@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node test-azure.js)"
+      "Bash(node test-azure.js)",
+      "Bash(where ngrok:*)",
+      "Bash(where choco:*)",
+      "Bash(choco install:*)",
+      "Bash(curl -Lo ngrok.zip https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip)",
+      "Bash(powershell -Command \"Expand-Archive -Path ngrok.zip -DestinationPath . -Force\")",
+      "Bash(del ngrok.zip)",
+      "Bash(dir ngrok.exe)",
+      "Bash(./ngrok.exe config:*)",
+      "Bash(./ngrok.exe http:*)",
+      "Bash(curl -s http://127.0.0.1:4040/api/tunnels)",
+      "Bash(npx qrcode-terminal:*)",
+      "Bash(npx -y qrcode-terminal \"https://unbribably-partis-charlee.ngrok-free.dev\" --small)",
+      "Bash(node -e \"const q=require\\(''qrcode-terminal''\\);q.generate\\(''https://unbribably-partis-charlee.ngrok-free.dev'',{small:true}\\)\")"
     ]
   }
 }

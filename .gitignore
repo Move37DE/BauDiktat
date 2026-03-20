@@ -8,3 +8,4 @@ backend/output/
 .DS_Store
 Thumbs.db
 backend/test-azure.js
+ngrok.exe
