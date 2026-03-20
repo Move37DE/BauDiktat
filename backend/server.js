@@ -188,6 +188,12 @@ async function transcribeWithAzure(audioPath) {
 // ── Timestamp Synchronisierung ───────────────────────────────────────────────
 
 function syncTimestamps(words, markers) {
+  console.log(`[Sync] ${words?.length || 0} Wörter, ${markers?.length || 0} Marker`);
+  if (words?.length > 0) {
+    console.log(`[Sync] Wort-Zeitraum: ${words[0].start}s – ${words[words.length-1].end}s`);
+  }
+  markers?.forEach((m, i) => console.log(`[Sync] Marker ${i}: t=${m.t}s foto=${m.photo}`));
+
   if (!words || words.length === 0) return [];
 
   const sortedMarkers = [...markers].sort((a, b) => a.t - b.t);
@@ -230,6 +236,12 @@ function syncTimestamps(words, markers) {
     });
     markerIdx++;
   }
+
+  console.log('[Sync] Ergebnis:');
+  result.forEach((b, i) => {
+    if (b.type === 'text') console.log(`  [${i}] TEXT: "${b.text.substring(0, 50)}..."`);
+    if (b.type === 'photo') console.log(`  [${i}] FOTO: ${b.photo} @ ${b.timestamp}s`);
+  });
 
   return result;
 }
@@ -312,11 +324,18 @@ app.post('/finalize', upload.fields([
   console.log(`[/finalize] Session ${sessionId} – ${photoFiles.length} Fotos`);
 
   try {
-    // 1. Transkription – Azure bevorzugt, Whisper als Fallback
+    // 1. Transkription – Echtzeit-Daten bevorzugen (bereits via Azure Streaming erhalten)
     let transcriptionResult;
 
-    if (useAzure) {
-      console.log('[/finalize] Transkribiere mit Azure Speech');
+    if (sessionData.realtimeWords && sessionData.realtimeWords.length > 0) {
+      // Echtzeit-Streaming hat bereits Word-Level Timestamps geliefert
+      console.log(`[/finalize] Nutze Echtzeit-Transkription (${sessionData.realtimeWords.length} Wörter)`);
+      transcriptionResult = {
+        text: sessionData.realtimeText || '',
+        words: sessionData.realtimeWords,
+      };
+    } else if (useAzure) {
+      console.log('[/finalize] Transkribiere mit Azure Speech (Datei)');
       try {
         transcriptionResult = await transcribeWithAzure(audioFile.path);
       } catch (azureErr) {
@@ -332,18 +351,48 @@ app.post('/finalize', upload.fields([
     const photoMap = {};
     photoFiles.forEach(f => { photoMap[f.originalname] = f.path; });
 
-    // 3. Timestamps synchronisieren
-    const syncedBlocks = syncTimestamps(
-      transcriptionResult.words || [],
-      sessionData.markers || [],
-    );
+    // 3. Blöcke zusammenbauen – orderedBlocks (sequenziell) bevorzugen
+    let blocksWithPaths;
 
-    // 4. Foto-Pfade auflösen
-    const blocksWithPaths = syncedBlocks.map(block => {
-      if (block.type === 'photo') {
-        return { ...block, localPath: photoMap[block.photo] || null };
+    if (sessionData.orderedBlocks && sessionData.orderedBlocks.length > 0) {
+      // Client hat die Reihenfolge bereits korrekt getrackt
+      console.log(`[/finalize] Nutze orderedBlocks (${sessionData.orderedBlocks.length} Blöcke)`);
+      blocksWithPaths = sessionData.orderedBlocks.map(block => {
+        if (block.type === 'photo') {
+          return { ...block, localPath: photoMap[block.photo] || null };
+        }
+        return block;
+      });
+    } else {
+      // Fallback: Timestamp-basierte Synchronisation
+      const syncedBlocks = syncTimestamps(
+        transcriptionResult.words || [],
+        sessionData.markers || [],
+      );
+      blocksWithPaths = syncedBlocks.map(block => {
+        if (block.type === 'photo') {
+          return { ...block, localPath: photoMap[block.photo] || null };
+        }
+        return block;
+      });
+    }
+
+    // Aufeinanderfolgende Text-Blöcke zusammenfassen
+    const mergedBlocks = [];
+    for (const block of blocksWithPaths) {
+      if (block.type === 'text' && mergedBlocks.length > 0 &&
+          mergedBlocks[mergedBlocks.length - 1].type === 'text') {
+        mergedBlocks[mergedBlocks.length - 1].text += ' ' + block.text;
+      } else {
+        mergedBlocks.push({ ...block });
       }
-      return block;
+    }
+    blocksWithPaths = mergedBlocks;
+
+    console.log('[/finalize] Blöcke:');
+    blocksWithPaths.forEach((b, i) => {
+      if (b.type === 'text') console.log(`  [${i}] TEXT: "${b.text.substring(0, 60)}..."`);
+      if (b.type === 'photo') console.log(`  [${i}] FOTO: ${b.photo}`);
     });
 
     // 5. DOCX generieren

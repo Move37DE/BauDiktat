@@ -39,6 +39,8 @@ const state = {
   sessionId:       crypto.randomUUID(),
   markers:         [],
   photos:          [],
+  words:           [],   // Word-Level Timestamps aus Azure Echtzeit-Streaming
+  blocks:          [],   // Geordnete Blöcke: [{type:'text',text}, {type:'photo',photo}]
   pendingPhoto:    null,
   stream:          null,
   cameraStream:    null,
@@ -330,16 +332,18 @@ function newSegment() {
 
 // ── Foto aufnehmen (Webcam) ───────────────────────────────────────────────────
 async function openCamera() {
-  if (!state.isRec) return;
+  if (state.segCount === 0) return; // Erst diktieren, dann fotografieren
 
-  // Aufnahme pausieren
-  clearInterval(state.chunkInterval);
-  clearInterval(state.timerInterval);
-  state.mediaRecorder?.pause?.();
+  // Aufnahme pausieren falls aktiv
+  if (state.isRec) {
+    clearInterval(state.chunkInterval);
+    clearInterval(state.timerInterval);
+    state.mediaRecorder?.pause?.();
 
-  // Azure PCM-Capture pausieren (aber WS offen lassen)
-  if (state.scriptProcessor) {
-    state.scriptProcessor.disconnect();
+    // Azure PCM-Capture pausieren (aber WS offen lassen)
+    if (state.scriptProcessor) {
+      state.scriptProcessor.disconnect();
+    }
   }
 
   try {
@@ -406,6 +410,8 @@ async function capturePhoto() {
     state.photos.push(photo);
     state.pendingPhoto = photo;
     state.markers.push({ t, photo: photoName });
+    // Foto als Block in die Reihenfolge einfügen
+    state.blocks.push({ type: 'photo', photo: photoName, timestamp: t });
 
     state.cameraStream?.getTracks().forEach(t => t.stop());
     state.cameraStream = null;
@@ -436,7 +442,7 @@ function keepPhoto() {
   $('dot-photo').className = 'state-dot';
   $('dot-photo-label').textContent = 'Kein Foto ausstehend';
   showScreen('main');
-  resumeRec();
+  if (state.isRec) resumeRec();
 }
 
 function retakePhoto() {
@@ -456,7 +462,7 @@ function cancelCamera() {
   state.cameraStream?.getTracks().forEach(t => t.stop());
   state.cameraStream = null;
   showScreen('main');
-  resumeRec();
+  if (state.isRec) resumeRec();
 }
 
 function resumeRec() {
@@ -491,6 +497,11 @@ async function finalizeSession() {
       projectName: state.projectName,
       markers: state.markers,
       sessionId: state.sessionId,
+      // Echtzeit-Transkription mitsenden → kein Re-Transcribe nötig
+      realtimeText: state.currentSegText,
+      realtimeWords: state.words,
+      // Geordnete Blöcke: Text und Fotos in der Reihenfolge wie sie entstanden sind
+      orderedBlocks: state.blocks,
     }));
 
     state.photos.forEach(photo => {
@@ -573,7 +584,8 @@ function updateRecUI(rec) {
   } else {
     btn.className = 'btn btn-rec paused';
     btn.innerHTML = '\u23FA Weiter aufnehmen';
-    $('btn-photo').disabled = true;
+    // Foto-Button bleibt aktiv nach Stop – Architekt diktiert, prüft Text, macht dann Fotos
+    $('btn-photo').disabled = !(state.segCount > 0);
     $('btn-seg').disabled = true;
     const has = state.segCount > 0;
     $('btn-send').disabled = !has;
@@ -640,8 +652,11 @@ function createSegCard(num) {
   list.scrollTop = list.scrollHeight;
 }
 
-function appendTextToCurrentSeg(text) {
+function appendTextToCurrentSeg(text, words) {
   if (!state.currentSegId) return;
+  if (words && words.length) state.words.push(...words);
+  // Block-Reihenfolge tracken: Text kommt rein → als Block merken
+  if (text.trim()) state.blocks.push({ type: 'text', text: text.trim() });
   state.currentSegText += (state.currentSegText ? ' ' : '') + text;
   const el = $(`${state.currentSegId}-text`);
   if (el) { el.textContent = state.currentSegText; el.className = 'seg-transcript live'; }
@@ -771,7 +786,7 @@ function resetApp() {
   Object.assign(state, {
     isRec:false, elapsed:0, segCount:0, photoCount:0,
     currentSegId:null, currentSegText:'', partialText:'', pendingPhoto:null,
-    markers:[], photos:[], allChunks:[], audioChunks:[],
+    markers:[], photos:[], words:[], blocks:[], allChunks:[], audioChunks:[],
     sessionId: crypto.randomUUID(),
     azureReady: false,
   });
