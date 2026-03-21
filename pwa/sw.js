@@ -1,5 +1,5 @@
 // BauDiktat Service Worker
-const CACHE = 'baudiktat-v2';
+const CACHE = 'baudiktat-v4';
 const ASSETS = ['/', '/index.html', '/app.js', '/manifest.json'];
 
 self.addEventListener('install', e => {
@@ -16,7 +16,7 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   // API-Calls und WebSocket nie cachen
-  if (e.request.url.includes('/transcribe') || e.request.url.includes('/finalize') || e.request.url.includes('/ws')) return;
+  if (e.request.url.includes('/api/') || e.request.url.includes('/transcribe') || e.request.url.includes('/finalize') || e.request.url.includes('/ws') || e.request.url.includes('/send-email')) return;
 
   // Network First: immer versuchen frisch zu holen, nur bei Offline den Cache nutzen
   e.respondWith(

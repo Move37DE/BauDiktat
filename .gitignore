@@ -9,3 +9,5 @@ backend/output/
 Thumbs.db
 backend/test-azure.js
 ngrok.exe
+deploy*.zip
+azure-logs*

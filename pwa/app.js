@@ -7,6 +7,7 @@
 'use strict';
 
 // ── Config ──────────────────────────────────────────────────────────────────
+const VERSION  = '0.3.0';
 const BACKEND = window.location.origin;
 const WS_URL  = BACKEND.replace(/^http/, 'ws') + '/ws';
 
@@ -45,6 +46,8 @@ const state = {
   stream:          null,
   cameraStream:    null,
   projectName:     'Baustelle',
+  lastSessionId:   null,        // für E-Mail-Versand
+  mailAvailable:   false,       // SMTP konfiguriert?
 };
 
 // ── DOM Refs ─────────────────────────────────────────────────────────────────
@@ -53,20 +56,44 @@ const $ = id => document.getElementById(id);
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   if ('serviceWorker' in navigator) {
+    // Alten SW deregistrieren und neuen aktivieren
+    navigator.serviceWorker.getRegistrations().then(regs => {
+      regs.forEach(r => r.update());
+    });
     navigator.serviceWorker.register('/sw.js').catch(console.warn);
   }
+  // Version anzeigen
+  const verEl = $('app-version');
+  if (verEl) verEl.textContent = 'v' + VERSION;
   updateClock();
   setInterval(updateClock, 10000);
   updateMeta();
 
   // Backend-Status abfragen: Azure oder Whisper?
   try {
-    const resp = await fetch(`${BACKEND}/api/status`);
+    const resp = await fetch(`${BACKEND}/api/status`, { cache: 'no-store' });
     const status = await resp.json();
     state.useAzure = status.azure;
-    console.log('[Init] Speech Engine:', state.useAzure ? 'Azure' : 'Whisper');
+    console.log('[Init] v' + VERSION + ' Speech Engine:', state.useAzure ? 'Azure' : 'Whisper');
   } catch (e) {
     console.warn('[Init] Backend nicht erreichbar, Demo-Modus');
+  }
+
+  // Mail-Status abfragen
+  try {
+    const mailResp = await fetch(`${BACKEND}/api/mail-status`, { cache: 'no-store' });
+    const mailStatus = await mailResp.json();
+    state.mailAvailable = mailStatus.available;
+    console.log('[Init] E-Mail:', state.mailAvailable ? 'verfügbar' : 'nicht konfiguriert');
+  } catch (e) {
+    console.warn('[Init] Mail-Status nicht abrufbar');
+  }
+
+  // Letzte E-Mail aus localStorage laden
+  const savedEmail = localStorage.getItem('baudiktat-email');
+  if (savedEmail) {
+    const emailInput = $('email-to');
+    if (emailInput) emailInput.value = savedEmail;
   }
 });
 
@@ -538,6 +565,9 @@ async function finalizeSession() {
 }
 
 function showDownloadLink(url, result) {
+  // SessionId für E-Mail-Versand speichern
+  state.lastSessionId = result.sessionId;
+
   const preview = $('output-preview');
   if (!preview) return;
   preview.style.display = 'block';
@@ -558,7 +588,17 @@ function showDownloadLink(url, result) {
       </a>
     `;
   }
+
+  // E-Mail-Button anzeigen (auch wenn SMTP nicht konfiguriert - Modal zeigt Hinweis)
+  $('btn-email').style.display = 'flex';
   $('btn-done').style.display = 'flex';
+
+  // Betreff automatisch setzen
+  const today = new Date().toLocaleDateString('de-DE');
+  const subjectInput = $('email-subject');
+  if (subjectInput && !subjectInput.value) {
+    subjectInput.value = `BauDiktat \u2013 Baustellenprotokoll ${today}`;
+  }
 }
 
 // ── UI Helpers ────────────────────────────────────────────────────────────────
@@ -780,6 +820,84 @@ async function simulateSend() {
   $('btn-done').style.display = 'flex';
 }
 
+// ── E-Mail-Versand ──────────────────────────────────────────────────────────
+function openEmailModal() {
+  $('email-modal').classList.add('active');
+  $('email-status').textContent = '';
+  $('btn-email-send').disabled = false;
+
+  if (!state.mailAvailable) {
+    $('email-status').textContent = '\u26A0 SMTP nicht konfiguriert – bitte .env pr\u00FCfen';
+    $('email-status').style.color = 'var(--accent)';
+  }
+
+  // Fokus auf E-Mail-Feld
+  setTimeout(() => $('email-to').focus(), 200);
+}
+
+function closeEmailModal() {
+  $('email-modal').classList.remove('active');
+}
+
+async function sendEmail() {
+  const to = $('email-to').value.trim();
+  const subject = $('email-subject').value.trim();
+  const message = $('email-message').value.trim();
+  const statusEl = $('email-status');
+
+  if (!to) {
+    statusEl.textContent = 'Bitte E-Mail-Adresse eingeben';
+    statusEl.style.color = 'var(--red)';
+    $('email-to').focus();
+    return;
+  }
+
+  // E-Mail validieren
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    statusEl.textContent = 'Ung\u00FCltige E-Mail-Adresse';
+    statusEl.style.color = 'var(--red)';
+    $('email-to').focus();
+    return;
+  }
+
+  // E-Mail in localStorage speichern
+  localStorage.setItem('baudiktat-email', to);
+
+  // Senden
+  $('btn-email-send').disabled = true;
+  statusEl.textContent = '\u27F3 Wird gesendet\u2026';
+  statusEl.style.color = 'var(--text2)';
+
+  try {
+    const resp = await fetch(`${BACKEND}/api/send-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: state.lastSessionId,
+        to,
+        subject,
+        message,
+      }),
+    });
+
+    const result = await resp.json();
+
+    if (!resp.ok) throw new Error(result.error || 'Fehler beim Senden');
+
+    statusEl.textContent = `\u2713 Gesendet an ${to}`;
+    statusEl.style.color = 'var(--green)';
+
+    // Modal nach 2s schlie\u00DFen
+    setTimeout(() => closeEmailModal(), 2000);
+
+  } catch (err) {
+    console.error('[Mail]', err);
+    statusEl.textContent = '\u2717 ' + err.message;
+    statusEl.style.color = 'var(--red)';
+    $('btn-email-send').disabled = false;
+  }
+}
+
 function resetApp() {
   stopAzureStream();
 
@@ -812,7 +930,9 @@ function resetApp() {
   });
 
   $('output-preview').style.display = 'none';
+  $('btn-email').style.display = 'none';
   $('btn-done').style.display = 'none';
+  closeEmailModal();
   $('send-badge').textContent = 'L\u00C4UFT';
   $('send-meta').textContent  = 'Wird verarbeitet\u2026';
   updateRecUI(false);
@@ -834,5 +954,8 @@ window.finalizeSession  = finalizeSession;
 window.playSegment      = playSegment;
 window.deleteSegment    = deleteSegment;
 window.resetApp         = resetApp;
+window.openEmailModal   = openEmailModal;
+window.closeEmailModal  = closeEmailModal;
+window.sendEmail        = sendEmail;
 
 })();

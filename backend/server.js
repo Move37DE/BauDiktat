@@ -11,7 +11,9 @@
  * Azure Speech ist primär, Whisper ist Fallback.
  */
 
+// .env im Projekt-Root laden (lokal), auf Azure kommen die Werte aus App Settings
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+require('dotenv').config(); // Fallback: .env im cwd (Azure)
 
 const express    = require('express');
 const cors       = require('cors');
@@ -23,6 +25,7 @@ const fs         = require('fs');
 const path       = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { createDocx } = require('./docx-generator');
+const nodemailer = require('nodemailer');
 const http       = require('http');
 const WebSocket  = require('ws');
 
@@ -48,6 +51,13 @@ const CONFIG = {
 
   AZURE_SPEECH_KEY:    process.env.AZURE_SPEECH_KEY    || '',
   AZURE_SPEECH_REGION: process.env.AZURE_SPEECH_REGION || 'westeurope',
+
+  // E-Mail (SMTP)
+  SMTP_HOST:   process.env.SMTP_HOST   || '',
+  SMTP_PORT:   parseInt(process.env.SMTP_PORT || '587'),
+  SMTP_USER:   process.env.SMTP_USER   || '',
+  SMTP_PASS:   process.env.SMTP_PASS   || '',
+  SMTP_FROM:   process.env.SMTP_FROM   || process.env.SMTP_USER || 'baudiktat@aska.de',
 
   UPLOAD_DIR: path.join(__dirname, 'uploads'),
   OUTPUT_DIR: path.join(__dirname, 'output'),
@@ -431,6 +441,78 @@ app.get('/download/:sessionId', (req, res) => {
   const docxPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}.docx`);
   if (!fs.existsSync(docxPath)) return res.status(404).json({ error: 'Not found' });
   res.download(docxPath, 'BauDiktat_Bericht.docx');
+});
+
+// ── E-Mail-Versand ──────────────────────────────────────────────────────────
+
+let smtpTransport = null;
+if (CONFIG.SMTP_HOST && CONFIG.SMTP_USER) {
+  smtpTransport = nodemailer.createTransport({
+    host: CONFIG.SMTP_HOST,
+    port: CONFIG.SMTP_PORT,
+    secure: CONFIG.SMTP_PORT === 465,
+    auth: { user: CONFIG.SMTP_USER, pass: CONFIG.SMTP_PASS },
+  });
+  console.log(`[Mail] SMTP konfiguriert: ${CONFIG.SMTP_USER} via ${CONFIG.SMTP_HOST}`);
+} else {
+  console.warn('[Mail] SMTP nicht konfiguriert – E-Mail-Versand deaktiviert');
+}
+
+app.get('/api/mail-status', (req, res) => {
+  res.json({ available: !!smtpTransport });
+});
+
+app.post('/api/send-email', express.json(), async (req, res) => {
+  const { sessionId, to, subject, message } = req.body;
+
+  if (!to || !sessionId) {
+    return res.status(400).json({ error: 'E-Mail-Adresse und Session-ID erforderlich' });
+  }
+
+  if (!smtpTransport) {
+    return res.status(503).json({ error: 'SMTP nicht konfiguriert. Bitte SMTP_HOST, SMTP_USER, SMTP_PASS in .env setzen.' });
+  }
+
+  const docxPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.docx`);
+  if (!fs.existsSync(docxPath)) {
+    return res.status(404).json({ error: 'DOCX nicht gefunden – bitte zuerst Transkription starten' });
+  }
+
+  const today = new Date().toLocaleDateString('de-DE', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+  });
+
+  try {
+    await smtpTransport.sendMail({
+      from: `"BauDiktat" <${CONFIG.SMTP_FROM}>`,
+      to,
+      subject: subject || `BauDiktat – Baustellenprotokoll ${today}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;color:#333;max-width:600px">
+          <h2 style="color:#e09a1a;margin-bottom:4px">BauDiktat – Baustellenprotokoll</h2>
+          <p style="color:#888;font-size:13px;margin-top:0">${today}</p>
+          ${message ? `<p>${message}</p>` : ''}
+          <p>Im Anhang finden Sie das Baustellenprotokoll als Word-Dokument.</p>
+          <hr style="border:none;border-top:1px solid #ddd;margin:20px 0">
+          <p style="font-size:11px;color:#999">
+            Erstellt mit <strong>BauDiktat</strong> by ASKA<br>
+            Sprache-zu-Dokument · Echtzeit-Diktat mit Fotos
+          </p>
+        </div>
+      `,
+      attachments: [{
+        filename: `BauDiktat_Bericht_${today.replace(/\./g, '-')}.docx`,
+        path: docxPath,
+      }],
+    });
+
+    console.log(`[Mail] Gesendet an ${to}`);
+    res.json({ success: true, to });
+
+  } catch (err) {
+    console.error('[Mail] Fehler:', err.message);
+    res.status(500).json({ error: 'E-Mail konnte nicht gesendet werden: ' + err.message });
+  }
 });
 
 // ── WebSocket: Azure Speech Echtzeit-Streaming ──────────────────────────────
