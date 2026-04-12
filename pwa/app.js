@@ -123,6 +123,16 @@ async function startRec() {
   state.isRec = true;
   state.sessionStart = Date.now();
   state.segCount++;
+
+  // Beim ersten Segment: Datum+Uhrzeit fixieren
+  if (state.segCount === 1 && !state.projectNameStamp) {
+    state.projectNameStamp = getDateTimeStamp();
+    updateProjectNameDisplay();
+  }
+
+  // Korrekturplatz-Link ausblenden während Aufnahme/Session aktiv
+  const korrekturBtn = $('btn-korrektur');
+  if (korrekturBtn) korrekturBtn.style.display = 'none';
   state.currentSegId = `seg-${state.segCount}`;
   state.currentSegText = '';
   state.partialText = '';
@@ -586,6 +596,14 @@ function showDownloadLink(url, result) {
          download>
         \u2193 BauDiktat_Bericht.docx herunterladen
       </a>
+      ${result.correctionUrl ? `
+      <a href="${BACKEND}${result.correctionUrl}" target="_blank"
+         style="display:flex;align-items:center;gap:8px;background:var(--bdim, rgba(74,143,212,0.15));
+                border:1px solid rgba(74,143,212,0.35);border-radius:8px;
+                padding:10px 14px;color:var(--blue);text-decoration:none;
+                font-family:'DM Mono',monospace;font-size:11px;margin-top:6px;">
+        \uD83C\uDFA7 Am Korrekturplatz bearbeiten
+      </a>` : ''}
     `;
   }
 
@@ -908,6 +926,9 @@ function resetApp() {
     sessionId: crypto.randomUUID(),
     azureReady: false,
   });
+  state.projectNameCustom = '';
+  state.projectNameStamp = '';
+  updateProjectNameDisplay();
   clearInterval(state.chunkInterval);
   clearInterval(state.timerInterval);
   state.stream?.getTracks().forEach(t => t.stop());
@@ -937,8 +958,48 @@ function resetApp() {
   $('send-meta').textContent  = 'Wird verarbeitet\u2026';
   updateRecUI(false);
   updateMeta();
+
+  // Korrekturplatz-Link wieder einblenden
+  const korrekturBtn = $('btn-korrektur');
+  if (korrekturBtn) korrekturBtn.style.display = '';
+
   showScreen('main');
 }
+
+function editProjectName() {
+  // Nur den benutzerdefinierten Teil editieren (ohne Datum-Suffix)
+  const currentCustom = state.projectNameCustom || '';
+  const name = prompt('Projektname (Datum/Uhrzeit wird automatisch ergaenzt):', currentCustom);
+  if (name !== null && name.trim()) {
+    state.projectNameCustom = name.trim();
+    updateProjectNameDisplay();
+  }
+}
+
+function getDateTimeStamp() {
+  const now = new Date();
+  const d = now.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const t = now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  return `${d} ${t}`;
+}
+
+function updateProjectNameDisplay() {
+  const stamp = state.projectNameStamp || getDateTimeStamp();
+  if (state.projectNameCustom) {
+    state.projectName = `${state.projectNameCustom} (${stamp})`;
+  } else {
+    state.projectName = `Diktat ${stamp}`;
+  }
+  const label = $('project-name-label');
+  if (label) label.textContent = state.projectName;
+}
+
+// Beim Start: Default-Name setzen
+(function() {
+  state.projectNameCustom = '';
+  state.projectNameStamp = '';
+  updateProjectNameDisplay();
+})();
 
 function toggleRec() { if (!state.isRec) startRec(); else stopRec(); }
 
@@ -957,5 +1018,6 @@ window.resetApp         = resetApp;
 window.openEmailModal   = openEmailModal;
 window.closeEmailModal  = closeEmailModal;
 window.sendEmail        = sendEmail;
+window.editProjectName  = editProjectName;
 
 })();

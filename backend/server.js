@@ -256,6 +256,121 @@ function syncTimestamps(words, markers) {
   return result;
 }
 
+// ── Diktat Post-Processing ──────────────────────────────────────────────────
+// Ersetzt gesprochene Diktat-Befehle und Aufzaehlungen im Word-Array.
+// Timestamps bleiben synchron: bei 1:1-Ersetzungen bleibt der Timestamp,
+// bei Multi-Wort-Ersetzungen (z.B. "neue Zeile") werden Timestamps zusammengefasst.
+
+const DICTATION_SINGLE = {
+  // Aufzaehlungen
+  'erstens':    '1.',
+  'zweitens':   '2.',
+  'drittens':   '3.',
+  'viertens':   '4.',
+  'fünftens':   '5.',
+  'sechstens':  '6.',
+  'siebtens':   '7.',
+  'achtens':    '8.',
+  'neuntens':   '9.',
+  'zehntens':   '10.',
+  // Satzzeichen
+  'komma':         ',',
+  'semikolon':     ';',
+  'doppelpunkt':   ':',
+  'ausrufezeichen':'!',
+  'fragezeichen':  '?',
+  'punkt':         '.',
+  'bindestrich':   '-',
+  'schrägstrich':  '/',
+  'klammer auf':   '(',
+  'klammer zu':    ')',
+};
+
+// Multi-Wort-Ersetzungen (gesprochen als mehrere Woerter)
+const DICTATION_MULTI = [
+  { match: ['neue', 'zeile'],    replace: '\n' },
+  { match: ['neuer', 'absatz'],  replace: '\n\n' },
+  { match: ['klammer', 'auf'],   replace: '(' },
+  { match: ['klammer', 'zu'],    replace: ')' },
+];
+
+// Hilfsfunktion: Interpunktion vom Wort trennen
+// Azure liefert oft "Zweitens," oder "Absatz." — Interpunktion muss abgetrennt werden
+function stripTrailingPunct(word) {
+  const match = word.match(/^(.+?)([.,;:!?]+)$/);
+  if (match) return { core: match[1], punct: match[2] };
+  return { core: word, punct: '' };
+}
+
+function postProcessWords(words, { skipLineBreaks = false } = {}) {
+  if (!words || words.length === 0) return words;
+
+  // Debug: Eingehende Wörter loggen
+  console.log('[PostProcess] Input:', words.map(w => w.word).join(' '));
+
+  const result = [];
+  let i = 0;
+
+  while (i < words.length) {
+    // Multi-Wort-Ersetzungen zuerst prüfen (Interpunktion am letzten Wort tolerieren)
+    let matched = false;
+    for (const rule of DICTATION_MULTI) {
+      if (skipLineBreaks && rule.replace.includes('\n')) continue;
+      const len = rule.match.length;
+      if (i + len <= words.length) {
+        const segment = words.slice(i, i + len).map((w, idx) => {
+          const { core } = stripTrailingPunct(w.word);
+          return core.toLowerCase();
+        });
+        if (segment.every((w, idx) => w === rule.match[idx])) {
+          // Trailing-Interpunktion des letzten Worts beibehalten
+          const lastPunct = stripTrailingPunct(words[i + len - 1].word).punct;
+          result.push({
+            word: rule.replace + lastPunct,
+            start: words[i].start,
+            end: words[i + len - 1].end,
+          });
+          i += len;
+          matched = true;
+          console.log(`[PostProcess] Multi-Match: "${rule.match.join(' ')}" → "${rule.replace}"`);
+          break;
+        }
+      }
+    }
+    if (matched) continue;
+
+    // Einzel-Wort-Ersetzungen (Interpunktion am Wort tolerieren)
+    const { core, punct } = stripTrailingPunct(words[i].word);
+    const lower = core.toLowerCase();
+    if (DICTATION_SINGLE[lower] !== undefined) {
+      const replacement = DICTATION_SINGLE[lower] + punct;
+      console.log(`[PostProcess] Match: "${words[i].word}" → "${replacement}"`);
+      result.push({
+        word: replacement,
+        start: words[i].start,
+        end: words[i].end,
+      });
+    } else {
+      result.push(words[i]);
+    }
+    i++;
+  }
+
+  // Satzzeichen an vorheriges Wort anhaengen (kein Leerzeichen davor)
+  const merged = [];
+  for (const w of result) {
+    if (merged.length > 0 && /^[.,;:!?)\-\/]$/.test(w.word)) {
+      merged[merged.length - 1].word += w.word;
+      merged[merged.length - 1].end = w.end;
+    } else {
+      merged.push({ ...w });
+    }
+  }
+
+  console.log('[PostProcess] Output:', merged.map(w => w.word).join(' '));
+  return merged;
+}
+
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 /**
@@ -357,6 +472,15 @@ app.post('/finalize', upload.fields([
       transcriptionResult = await runWhisper(audioFile.path, CONFIG.WHISPER_MODEL_FINAL);
     }
 
+    // 1b. Diktat-Post-Processing (Aufzaehlungen, Satzzeichen, Absaetze)
+    if (transcriptionResult.words && transcriptionResult.words.length > 0) {
+      const before = transcriptionResult.words.length;
+      transcriptionResult.words = postProcessWords(transcriptionResult.words);
+      transcriptionResult.text = transcriptionResult.words.map(w => w.word).join(' ')
+        .replace(/ ([.,;:!?)\-\/])/g, '$1'); // Satzzeichen ohne Leerzeichen davor
+      console.log(`[/finalize] Post-Processing: ${before} → ${transcriptionResult.words.length} Wörter`);
+    }
+
     // 2. Foto-Map aufbauen
     const photoMap = {};
     photoFiles.forEach(f => { photoMap[f.originalname] = f.path; });
@@ -365,14 +489,32 @@ app.post('/finalize', upload.fields([
     let blocksWithPaths;
 
     if (sessionData.orderedBlocks && sessionData.orderedBlocks.length > 0) {
-      // Client hat die Reihenfolge bereits korrekt getrackt
+      // Client hat die Reihenfolge (Text + Fotos) getrackt
+      // Foto-Blöcke behalten, Text durch post-processed Version ersetzen
       console.log(`[/finalize] Nutze orderedBlocks (${sessionData.orderedBlocks.length} Blöcke)`);
-      blocksWithPaths = sessionData.orderedBlocks.map(block => {
-        if (block.type === 'photo') {
-          return { ...block, localPath: photoMap[block.photo] || null };
-        }
-        return block;
-      });
+
+      const processedText = transcriptionResult.text || '';
+      const photoBlocks = sessionData.orderedBlocks
+        .filter(b => b.type === 'photo')
+        .map(b => ({ ...b, localPath: photoMap[b.photo] || null }));
+
+      if (photoBlocks.length === 0) {
+        // Keine Fotos → nur Text-Block(s) aus post-processed Text
+        blocksWithPaths = [{ type: 'text', text: processedText }];
+      } else {
+        // Fotos vorhanden: Text + Fotos via Timestamp-Sync zusammenbauen
+        // Post-processed Words haben korrekte Timestamps, Marker auch
+        const syncedBlocks = syncTimestamps(
+          transcriptionResult.words || [],
+          sessionData.markers || [],
+        );
+        blocksWithPaths = syncedBlocks.map(block => {
+          if (block.type === 'photo') {
+            return { ...block, localPath: photoMap[block.photo] || null };
+          }
+          return block;
+        });
+      }
     } else {
       // Fallback: Timestamp-basierte Synchronisation
       const syncedBlocks = syncTimestamps(
@@ -399,13 +541,61 @@ app.post('/finalize', upload.fields([
     }
     blocksWithPaths = mergedBlocks;
 
+    // Text-Blöcke an \n\n (neuer Absatz) aufteilen → separate Blöcke
+    const splitBlocks = [];
+    for (const block of blocksWithPaths) {
+      if (block.type === 'text' && block.text.includes('\n')) {
+        const parts = block.text.split(/\n+/).map(p => p.trim()).filter(p => p.length > 0);
+        parts.forEach(part => splitBlocks.push({ type: 'text', text: part }));
+      } else {
+        splitBlocks.push(block);
+      }
+    }
+    blocksWithPaths = splitBlocks;
+
     console.log('[/finalize] Blöcke:');
     blocksWithPaths.forEach((b, i) => {
       if (b.type === 'text') console.log(`  [${i}] TEXT: "${b.text.substring(0, 60)}..."`);
       if (b.type === 'photo') console.log(`  [${i}] FOTO: ${b.photo}`);
     });
 
-    // 5. DOCX generieren
+    // 5. Audio + Fotos + Session-Daten persistieren (für Korrekturplatz)
+    const audioOutPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.webm`);
+    fs.copyFileSync(audioFile.path, audioOutPath);
+    console.log(`[/finalize] Audio gespeichert: ${audioOutPath}`);
+
+    // Fotos in eigenen Ordner kopieren
+    const photosDir = path.join(CONFIG.OUTPUT_DIR, `${sessionId}-photos`);
+    if (photoFiles.length > 0) {
+      if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+      photoFiles.forEach(f => {
+        const dest = path.join(photosDir, f.originalname);
+        fs.copyFileSync(f.path, dest);
+      });
+      console.log(`[/finalize] ${photoFiles.length} Fotos gespeichert in ${photosDir}`);
+    }
+
+    // Session-JSON speichern (für Korrekturplatz)
+    const sessionJson = {
+      sessionId,
+      projectName: sessionData.projectName || 'Baustelle',
+      date: new Date().toISOString(),
+      dateFormatted: new Date().toLocaleDateString('de-DE'),
+      text: transcriptionResult.text?.trim() || '',
+      words: transcriptionResult.words || [],
+      blocks: blocksWithPaths.map(b => {
+        if (b.type === 'photo') {
+          return { type: 'photo', photo: b.photo, timestamp: b.timestamp, caption: b.caption || '' };
+        }
+        return { type: 'text', text: b.text };
+      }),
+      photoFiles: photoFiles.map(f => f.originalname),
+    };
+    const sessionJsonPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.json`);
+    fs.writeFileSync(sessionJsonPath, JSON.stringify(sessionJson, null, 2));
+    console.log(`[/finalize] Session-JSON gespeichert: ${sessionJsonPath}`);
+
+    // 6. DOCX generieren
     const docxPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.docx`);
     await createDocx({
       blocks: blocksWithPaths,
@@ -415,7 +605,7 @@ app.post('/finalize', upload.fields([
       outputPath: docxPath,
     });
 
-    // 6. Aufräumen
+    // 7. Temporäre Uploads aufräumen (Originale sind jetzt in output/ gesichert)
     fs.unlinkSync(audioFile.path);
     photoFiles.forEach(f => { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); });
 
@@ -423,6 +613,7 @@ app.post('/finalize', upload.fields([
     res.json({
       sessionId,
       downloadUrl: `/download/${sessionId}`,
+      correctionUrl: `/korrektur/${sessionId}`,
       text: transcriptionResult.text?.trim(),
       blockCount: blocksWithPaths.length,
       photoCount: blocksWithPaths.filter(b => b.type === 'photo').length,
@@ -493,6 +684,18 @@ app.post('/api/send-email', express.json(), async (req, res) => {
           <p style="color:#888;font-size:13px;margin-top:0">${today}</p>
           ${message ? `<p>${message}</p>` : ''}
           <p>Im Anhang finden Sie das Baustellenprotokoll als Word-Dokument.</p>
+          ${sessionId ? `
+          <p style="margin-top:16px">
+            <a href="${req.protocol}://${req.get('host')}/korrektur/${sessionId}"
+               style="display:inline-block;background:#e09a1a;color:#fff;padding:10px 20px;
+                      border-radius:6px;text-decoration:none;font-weight:500;font-size:14px;">
+              Am Korrekturplatz bearbeiten
+            </a>
+          </p>
+          <p style="font-size:12px;color:#888;margin-top:8px">
+            Audio anhoeren, Text korrigieren und neues DOCX generieren.
+          </p>
+          ` : ''}
           <hr style="border:none;border-top:1px solid #ddd;margin:20px 0">
           <p style="font-size:11px;color:#999">
             Erstellt mit <strong>BauDiktat</strong> by ASKA<br>
@@ -512,6 +715,158 @@ app.post('/api/send-email', express.json(), async (req, res) => {
   } catch (err) {
     console.error('[Mail] Fehler:', err.message);
     res.status(500).json({ error: 'E-Mail konnte nicht gesendet werden: ' + err.message });
+  }
+});
+
+// ── Korrekturplatz: API-Endpoints ──────────────────────────────────────────
+
+// Statische Dateien für Korrekturplatz
+app.use('/korrektur', express.static(path.join(__dirname, '..', 'pwa', 'korrektur')));
+
+// Korrektur-Seite aufrufen (Redirect zu statischer Seite)
+app.get('/korrektur/:sessionId', (req, res) => {
+  const jsonPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}.json`);
+  if (!fs.existsSync(jsonPath)) return res.status(404).send('Session nicht gefunden');
+  res.sendFile(path.join(__dirname, '..', 'pwa', 'korrektur', 'index.html'));
+});
+
+// Session-Daten laden
+app.get('/api/session/:sessionId', (req, res) => {
+  const jsonPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}.json`);
+  if (!fs.existsSync(jsonPath)) return res.status(404).json({ error: 'Session nicht gefunden' });
+
+  try {
+    const session = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    res.json(session);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Audio-Datei streamen
+app.get('/api/session/:sessionId/audio', (req, res) => {
+  const audioPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}.webm`);
+  if (!fs.existsSync(audioPath)) return res.status(404).json({ error: 'Audio nicht gefunden' });
+  res.sendFile(audioPath);
+});
+
+// Foto laden
+app.get('/api/session/:sessionId/photo/:filename', (req, res) => {
+  const photoPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}-photos`, req.params.filename);
+  if (!fs.existsSync(photoPath)) return res.status(404).json({ error: 'Foto nicht gefunden' });
+  res.sendFile(photoPath);
+});
+
+// Alle Sessions auflisten (für Korrekturplatz-Übersicht)
+app.get('/api/sessions', (req, res) => {
+  try {
+    const files = fs.readdirSync(CONFIG.OUTPUT_DIR).filter(f => f.endsWith('.json'));
+    const sessions = files.map(f => {
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(CONFIG.OUTPUT_DIR, f), 'utf8'));
+        return {
+          sessionId: data.sessionId,
+          projectName: data.projectName,
+          date: data.date,
+          dateFormatted: data.dateFormatted,
+          blockCount: data.blocks?.length || 0,
+          photoCount: data.photoFiles?.length || 0,
+          hasAudio: fs.existsSync(path.join(CONFIG.OUTPUT_DIR, `${data.sessionId}.webm`)),
+        };
+      } catch { return null; }
+    }).filter(Boolean).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    res.json(sessions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Korrektur speichern + neues DOCX generieren
+app.post('/api/session/:sessionId/correct', express.json({ limit: '10mb' }), async (req, res) => {
+  const { sessionId } = req.params;
+  const { blocks } = req.body;
+
+  const jsonPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.json`);
+  if (!fs.existsSync(jsonPath)) return res.status(404).json({ error: 'Session nicht gefunden' });
+
+  try {
+    // Session-JSON aktualisieren
+    const session = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    session.blocks = blocks;
+    session.correctedAt = new Date().toISOString();
+
+    // Text aus Blöcken zusammensetzen
+    session.text = blocks.filter(b => b.type === 'text').map(b => b.text).join(' ');
+
+    fs.writeFileSync(jsonPath, JSON.stringify(session, null, 2));
+
+    // Foto-Pfade für DOCX auflösen
+    const photosDir = path.join(CONFIG.OUTPUT_DIR, `${sessionId}-photos`);
+    const blocksWithPaths = blocks.map(block => {
+      if (block.type === 'photo') {
+        const localPath = path.join(photosDir, block.photo);
+        return { ...block, localPath: fs.existsSync(localPath) ? localPath : null };
+      }
+      return block;
+    });
+
+    // Neues DOCX generieren
+    const docxPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.docx`);
+    await createDocx({
+      blocks: blocksWithPaths,
+      projectName: session.projectName || 'Baustelle',
+      date: session.dateFormatted || new Date().toLocaleDateString('de-DE'),
+      sessionId,
+      outputPath: docxPath,
+    });
+
+    console.log(`[Korrektur] Session ${sessionId} korrigiert, neues DOCX generiert`);
+    res.json({
+      success: true,
+      downloadUrl: `/download/${sessionId}`,
+      correctedAt: session.correctedAt,
+    });
+
+  } catch (err) {
+    console.error('[Korrektur]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Session löschen
+app.delete('/api/session/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+
+  // Validierung: nur UUID-Format erlauben
+  if (!/^[a-f0-9-]{36}$/.test(sessionId)) {
+    return res.status(400).json({ error: 'Ungültige Session-ID' });
+  }
+
+  const files = [
+    path.join(CONFIG.OUTPUT_DIR, `${sessionId}.json`),
+    path.join(CONFIG.OUTPUT_DIR, `${sessionId}.docx`),
+    path.join(CONFIG.OUTPUT_DIR, `${sessionId}.webm`),
+  ];
+  const photosDir = path.join(CONFIG.OUTPUT_DIR, `${sessionId}-photos`);
+
+  // Prüfen ob Session existiert
+  if (!fs.existsSync(files[0])) {
+    return res.status(404).json({ error: 'Session nicht gefunden' });
+  }
+
+  try {
+    files.forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
+    if (fs.existsSync(photosDir)) {
+      fs.readdirSync(photosDir).forEach(f => fs.unlinkSync(path.join(photosDir, f)));
+      fs.rmdirSync(photosDir);
+    }
+
+    console.log(`[Delete] Session ${sessionId} gelöscht`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Delete]', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -591,11 +946,16 @@ wss.on('connection', (ws) => {
               console.warn('[Azure WS] Word parse error:', parseErr.message);
             }
 
+            // Diktat-Post-Processing (ohne Zeilenumbrüche im Live-Stream)
+            const processed = postProcessWords(words, { skipLineBreaks: true });
+            const processedText = processed.map(w => w.word).join(' ')
+              .replace(/ ([.,;:!?)\-\/])/g, '$1');
+
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({
                 type: 'final',
-                text: e.result.text,
-                words,
+                text: processedText,
+                words: processed,
               }));
             }
           }

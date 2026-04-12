@@ -18,7 +18,7 @@
   --accent:#e09a1a;--adim:rgba(224,154,26,0.13);--adim2:rgba(224,154,26,0.24);
   --red:#d94f3a;--rdim:rgba(217,79,58,0.14);
   --green:#52b06a;--gdim:rgba(82,176,106,0.12);
-  --blue:#4a8fd4;
+  --blue:#4a8fd4;--bdim:rgba(74,143,212,0.15);
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{height:100%;overflow:hidden;}
@@ -231,7 +231,7 @@ body{
         <div class="header-badge" id="status-badge">BEREIT</div>
       </div>
       <div class="session-meta">
-        <div class="meta-item">🏗 Baustelle A47</div>
+        <div class="meta-item" style="cursor:pointer" onclick="window.editProjectName()">🏗 <span id="project-name-label">Baustelle</span> ✎</div>
         <div class="meta-item" id="seg-count-meta">0 Segmente</div>
         <div class="meta-item" id="photo-count-meta">0 Fotos</div>
       </div>
@@ -253,6 +253,7 @@ body{
         <button class="btn btn-new-seg" id="btn-seg" disabled onclick="window.newSegment()">✂ Neues Segment</button>
       </div>
       <button class="btn btn-send" id="btn-send" disabled onclick="window.finalizeSession()">↗ Transkribieren &amp; Senden</button>
+      <a href="/korrektur/" id="btn-korrektur" class="btn btn-send" style="text-decoration:none;text-align:center;margin-top:4px;background:var(--bdim);color:var(--blue);border:1px solid rgba(74,143,212,0.3);">🎧 Korrekturplatz</a>
     </div>
   </div>
 
