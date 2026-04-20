@@ -757,6 +757,26 @@ app.get('/api/session/:sessionId/photo/:filename', (req, res) => {
   res.sendFile(photoPath);
 });
 
+// Foto ersetzen (Upload neues Bild)
+app.post('/api/session/:sessionId/photo/:filename', upload.single('photo'), (req, res) => {
+  const { sessionId, filename } = req.params;
+  const photosDir = path.join(CONFIG.OUTPUT_DIR, `${sessionId}-photos`);
+  const photoPath = path.join(photosDir, filename);
+
+  if (!fs.existsSync(photosDir)) return res.status(404).json({ error: 'Session-Fotos nicht gefunden' });
+  if (!req.file) return res.status(400).json({ error: 'Kein Bild hochgeladen' });
+
+  try {
+    fs.copyFileSync(req.file.path, photoPath);
+    fs.unlinkSync(req.file.path);
+    console.log(`[Photo] Ersetzt: ${sessionId}/${filename}`);
+    res.json({ ok: true, photo: filename });
+  } catch (err) {
+    console.error('[Photo] Ersetzen fehlgeschlagen:', err);
+    res.status(500).json({ error: 'Foto ersetzen fehlgeschlagen' });
+  }
+});
+
 // Alle Sessions auflisten (für Korrekturplatz-Übersicht)
 app.get('/api/sessions', (req, res) => {
   try {

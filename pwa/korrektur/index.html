@@ -85,6 +85,10 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);}
 .photo-block-caption{padding:8px 12px;font-size:12px;color:var(--text2);border-top:1px solid var(--border);}
 .photo-block-caption input{background:transparent;border:none;color:var(--text2);font-size:12px;font-style:italic;width:100%;outline:none;font-family:'DM Sans',sans-serif;}
 .photo-block-caption input:focus{color:var(--text);}
+.photo-block-wrap{position:relative;}
+.btn-replace-photo{position:absolute;top:8px;right:8px;padding:6px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.7);color:#fff;font-family:'DM Sans',sans-serif;font-size:11px;cursor:pointer;opacity:0;transition:opacity 0.15s;backdrop-filter:blur(4px);display:flex;align-items:center;gap:4px;}
+.photo-block-wrap:hover .btn-replace-photo{opacity:1;}
+.btn-replace-photo:hover{background:rgba(0,0,0,0.9);border-color:var(--accent);color:var(--accent);}
 
 /* Action Buttons */
 .btn-action{padding:8px 16px;border-radius:6px;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;transition:all 0.15s;display:flex;align-items:center;gap:6px;}
@@ -417,11 +421,46 @@ function renderBlocks() {
       header.className = 'photo-block-header';
       header.textContent = `Foto: ${block.photo} [${formatTime(block.timestamp)}]`;
 
+      const wrap = document.createElement('div');
+      wrap.className = 'photo-block-wrap';
+
       const img = document.createElement('img');
       img.className = 'photo-block-img';
       img.src = `${BACKEND}/api/session/${currentSession.sessionId}/photo/${block.photo}`;
       img.alt = block.photo;
       img.onerror = () => { img.style.display = 'none'; };
+
+      const replaceBtn = document.createElement('button');
+      replaceBtn.className = 'btn-replace-photo';
+      replaceBtn.innerHTML = '&#128247; Ersetzen';
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = 'image/*';
+      fileInput.style.display = 'none';
+      replaceBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', async () => {
+        if (!fileInput.files[0]) return;
+        const fd = new FormData();
+        fd.append('photo', fileInput.files[0]);
+        try {
+          replaceBtn.textContent = 'Hochladen...';
+          const resp = await fetch(`${BACKEND}/api/session/${currentSession.sessionId}/photo/${block.photo}`, { method: 'POST', body: fd });
+          if (!resp.ok) throw new Error('Upload fehlgeschlagen');
+          img.src = `${BACKEND}/api/session/${currentSession.sessionId}/photo/${block.photo}?t=${Date.now()}`;
+          img.style.display = 'block';
+          isDirty = true;
+          updateDirtyState();
+          showToast('Foto ersetzt', 'success');
+        } catch (err) {
+          showToast('Fehler: ' + err.message, 'error');
+        } finally {
+          replaceBtn.innerHTML = '&#128247; Ersetzen';
+        }
+      });
+
+      wrap.appendChild(img);
+      wrap.appendChild(replaceBtn);
+      wrap.appendChild(fileInput);
 
       const caption = document.createElement('div');
       caption.className = 'photo-block-caption';
@@ -437,7 +476,7 @@ function renderBlocks() {
       caption.appendChild(captionInput);
 
       div.appendChild(header);
-      div.appendChild(img);
+      div.appendChild(wrap);
       div.appendChild(caption);
       container.appendChild(div);
     }
