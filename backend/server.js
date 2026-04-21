@@ -448,11 +448,17 @@ app.post('/finalize', upload.fields([
   const sessionId = uuidv4();
   console.log(`[/finalize] Session ${sessionId} – ${photoFiles.length} Fotos`);
 
+  const mode = sessionData.mode === 'classic' ? 'classic' : 'pro';
+  console.log(`[/finalize] Modus: ${mode}`);
+
   try {
-    // 1. Transkription – Echtzeit-Daten bevorzugen (bereits via Azure Streaming erhalten)
+    // 1. Transkription – bei Classic überspringen
     let transcriptionResult;
 
-    if (sessionData.realtimeWords && sessionData.realtimeWords.length > 0) {
+    if (mode === 'classic') {
+      console.log('[/finalize] Classic-Modus: keine Transkription');
+      transcriptionResult = { text: '', words: [] };
+    } else if (sessionData.realtimeWords && sessionData.realtimeWords.length > 0) {
       // Echtzeit-Streaming hat bereits Word-Level Timestamps geliefert
       console.log(`[/finalize] Nutze Echtzeit-Transkription (${sessionData.realtimeWords.length} Wörter)`);
       transcriptionResult = {
@@ -488,7 +494,18 @@ app.post('/finalize', upload.fields([
     // 3. Blöcke zusammenbauen – orderedBlocks (sequenziell) bevorzugen
     let blocksWithPaths;
 
-    if (sessionData.orderedBlocks && sessionData.orderedBlocks.length > 0) {
+    if (mode === 'classic') {
+      // Classic: Blocks direkt aus orderedBlocks übernehmen (Text leer, Fotos mit Timestamps)
+      console.log(`[/finalize] Classic-Blocks übernehmen (${(sessionData.orderedBlocks || []).length})`);
+      blocksWithPaths = (sessionData.orderedBlocks || []).map(block => {
+        if (block.type === 'photo') {
+          return { ...block, localPath: photoMap[block.photo] || null };
+        }
+        return { type: 'text', text: block.text || '' };
+      });
+      // Falls gar keine Blocks: mindestens einen leeren Textblock
+      if (blocksWithPaths.length === 0) blocksWithPaths = [{ type: 'text', text: '' }];
+    } else if (sessionData.orderedBlocks && sessionData.orderedBlocks.length > 0) {
       // Client hat die Reihenfolge (Text + Fotos) getrackt
       // Foto-Blöcke behalten, Text durch post-processed Version ersetzen
       console.log(`[/finalize] Nutze orderedBlocks (${sessionData.orderedBlocks.length} Blöcke)`);
@@ -578,6 +595,7 @@ app.post('/finalize', upload.fields([
     // Session-JSON speichern (für Korrekturplatz)
     const sessionJson = {
       sessionId,
+      mode,
       projectName: sessionData.projectName || 'Baustelle',
       date: new Date().toISOString(),
       dateFormatted: new Date().toLocaleDateString('de-DE'),
@@ -786,6 +804,7 @@ app.get('/api/sessions', (req, res) => {
         const data = JSON.parse(fs.readFileSync(path.join(CONFIG.OUTPUT_DIR, f), 'utf8'));
         return {
           sessionId: data.sessionId,
+          mode: data.mode || 'pro',
           projectName: data.projectName,
           date: data.date,
           dateFormatted: data.dateFormatted,

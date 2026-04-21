@@ -253,7 +253,10 @@ body{
         <button class="btn btn-new-seg" id="btn-seg" disabled onclick="window.newSegment()">✂ Neues Segment</button>
       </div>
       <button class="btn btn-send" id="btn-send" disabled onclick="window.finalizeSession()">↗ Transkribieren &amp; Senden</button>
-      <a href="/korrektur/" id="btn-korrektur" class="btn btn-send" style="text-decoration:none;text-align:center;margin-top:4px;background:var(--bdim);color:var(--blue);border:1px solid rgba(74,143,212,0.3);">🎧 Korrekturplatz</a>
+      <div style="display:flex;gap:6px;margin-top:4px;">
+        <a href="/korrektur/" id="btn-korrektur" class="btn btn-send" style="flex:1;text-decoration:none;text-align:center;background:var(--bdim);color:var(--blue);border:1px solid rgba(74,143,212,0.3);">🎧 Korrekturplatz</a>
+        <a href="/classic/" class="btn btn-send" style="flex:0 0 auto;text-decoration:none;text-align:center;background:var(--surface);color:var(--text2);border:1px solid var(--border2);font-size:11px;padding:10px 12px;">↗ Classic</a>
+      </div>
     </div>
   </div>
 
