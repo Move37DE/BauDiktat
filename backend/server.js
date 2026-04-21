@@ -76,7 +76,13 @@ const useAzure = !!(sdk && CONFIG.AZURE_SPEECH_KEY);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// PWA-Dateien aus ../pwa servieren
+// Root zeigt Classic-Variante (Default). Pro ist unter /pro/ erreichbar.
+app.get('/', (req, res) => res.redirect(302, '/classic/'));
+
+// Pro-PWA als Alias mounten — erlaubt /pro/ → pwa/index.html, /pro/app.js → pwa/app.js etc.
+app.use('/pro', express.static(path.join(__dirname, '..', 'pwa')));
+
+// PWA-Dateien aus ../pwa servieren (/classic, /korrektur, /manifest.json, /sw.js, …)
 app.use(express.static(path.join(__dirname, '..', 'pwa')));
 
 const storage = multer.diskStorage({
@@ -437,11 +443,13 @@ app.post('/transcribe-azure', upload.single('audio'), async (req, res) => {
 app.post('/finalize', upload.fields([
   { name: 'audio', maxCount: 1 },
   { name: 'photos', maxCount: 50 },
+  { name: 'audio_segments', maxCount: 100 },
 ]), async (req, res) => {
 
   const sessionData = JSON.parse(req.body.session || '{}');
   const audioFile   = req.files?.audio?.[0];
   const photoFiles  = req.files?.photos || [];
+  const segmentFiles = req.files?.audio_segments || [];
 
   if (!audioFile) return res.status(400).json({ error: 'No audio file' });
 
@@ -495,16 +503,20 @@ app.post('/finalize', upload.fields([
     let blocksWithPaths;
 
     if (mode === 'classic') {
-      // Classic: Blocks direkt aus orderedBlocks übernehmen (Text leer, Fotos mit Timestamps)
+      // Classic: Blocks direkt aus orderedBlocks übernehmen (Text leer, Fotos mit Timestamps).
+      // Segment-Zuordnung beibehalten, damit der Korrekturplatz pro Abschnitt gruppieren kann.
       console.log(`[/finalize] Classic-Blocks übernehmen (${(sessionData.orderedBlocks || []).length})`);
       blocksWithPaths = (sessionData.orderedBlocks || []).map(block => {
         if (block.type === 'photo') {
           return { ...block, localPath: photoMap[block.photo] || null };
         }
-        return { type: 'text', text: block.text || '' };
+        return { type: 'text', text: block.text || '', segment: block.segment };
       });
-      // Falls gar keine Blocks: mindestens einen leeren Textblock
-      if (blocksWithPaths.length === 0) blocksWithPaths = [{ type: 'text', text: '' }];
+      // Falls gar keine Blocks: mindestens einen leeren Textblock pro bekanntem Segment
+      if (blocksWithPaths.length === 0) {
+        const nums = sessionData.segmentNumbers || [1];
+        blocksWithPaths = nums.map(n => ({ type: 'text', text: '', segment: n }));
+      }
     } else if (sessionData.orderedBlocks && sessionData.orderedBlocks.length > 0) {
       // Client hat die Reihenfolge (Text + Fotos) getrackt
       // Foto-Blöcke behalten, Text durch post-processed Version ersetzen
@@ -546,29 +558,31 @@ app.post('/finalize', upload.fields([
       });
     }
 
-    // Aufeinanderfolgende Text-Blöcke zusammenfassen
-    const mergedBlocks = [];
-    for (const block of blocksWithPaths) {
-      if (block.type === 'text' && mergedBlocks.length > 0 &&
-          mergedBlocks[mergedBlocks.length - 1].type === 'text') {
-        mergedBlocks[mergedBlocks.length - 1].text += ' ' + block.text;
-      } else {
-        mergedBlocks.push({ ...block });
+    if (mode !== 'classic') {
+      // Aufeinanderfolgende Text-Blöcke zusammenfassen (nur Pro — Classic behält Segment-Grenzen)
+      const mergedBlocks = [];
+      for (const block of blocksWithPaths) {
+        if (block.type === 'text' && mergedBlocks.length > 0 &&
+            mergedBlocks[mergedBlocks.length - 1].type === 'text') {
+          mergedBlocks[mergedBlocks.length - 1].text += ' ' + block.text;
+        } else {
+          mergedBlocks.push({ ...block });
+        }
       }
-    }
-    blocksWithPaths = mergedBlocks;
+      blocksWithPaths = mergedBlocks;
 
-    // Text-Blöcke an \n\n (neuer Absatz) aufteilen → separate Blöcke
-    const splitBlocks = [];
-    for (const block of blocksWithPaths) {
-      if (block.type === 'text' && block.text.includes('\n')) {
-        const parts = block.text.split(/\n+/).map(p => p.trim()).filter(p => p.length > 0);
-        parts.forEach(part => splitBlocks.push({ type: 'text', text: part }));
-      } else {
-        splitBlocks.push(block);
+      // Text-Blöcke an \n\n (neuer Absatz) aufteilen → separate Blöcke
+      const splitBlocks = [];
+      for (const block of blocksWithPaths) {
+        if (block.type === 'text' && block.text.includes('\n')) {
+          const parts = block.text.split(/\n+/).map(p => p.trim()).filter(p => p.length > 0);
+          parts.forEach(part => splitBlocks.push({ type: 'text', text: part }));
+        } else {
+          splitBlocks.push(block);
+        }
       }
+      blocksWithPaths = splitBlocks;
     }
-    blocksWithPaths = splitBlocks;
 
     console.log('[/finalize] Blöcke:');
     blocksWithPaths.forEach((b, i) => {
@@ -580,6 +594,24 @@ app.post('/finalize', upload.fields([
     const audioOutPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.webm`);
     fs.copyFileSync(audioFile.path, audioOutPath);
     console.log(`[/finalize] Audio gespeichert: ${audioOutPath}`);
+
+    // Segment-Audios (Classic) separat ablegen — erlaubt im Korrekturplatz pro Abschnitt
+    // einen eigenen Player ohne WebM-Container-Konkatenationsprobleme.
+    const segmentAudios = [];
+    segmentFiles.forEach(f => {
+      // originalname ist z. B. "segment-3.webm"
+      const match = /segment-(\d+)\.webm$/i.exec(f.originalname) || /segment-(\d+)/i.exec(f.originalname);
+      const seg = match ? parseInt(match[1], 10) : null;
+      if (seg == null) return;
+      const destName = `${sessionId}-seg-${seg}.webm`;
+      const destPath = path.join(CONFIG.OUTPUT_DIR, destName);
+      fs.copyFileSync(f.path, destPath);
+      segmentAudios.push({ seg, file: destName });
+    });
+    segmentAudios.sort((a, b) => a.seg - b.seg);
+    if (segmentAudios.length > 0) {
+      console.log(`[/finalize] ${segmentAudios.length} Abschnitts-Audios gespeichert`);
+    }
 
     // Fotos in eigenen Ordner kopieren
     const photosDir = path.join(CONFIG.OUTPUT_DIR, `${sessionId}-photos`);
@@ -603,11 +635,12 @@ app.post('/finalize', upload.fields([
       words: transcriptionResult.words || [],
       blocks: blocksWithPaths.map(b => {
         if (b.type === 'photo') {
-          return { type: 'photo', photo: b.photo, timestamp: b.timestamp, caption: b.caption || '' };
+          return { type: 'photo', photo: b.photo, timestamp: b.timestamp, caption: b.caption || '', segment: b.segment };
         }
-        return { type: 'text', text: b.text };
+        return { type: 'text', text: b.text, segment: b.segment };
       }),
       photoFiles: photoFiles.map(f => f.originalname),
+      segmentAudios,
     };
     const sessionJsonPath = path.join(CONFIG.OUTPUT_DIR, `${sessionId}.json`);
     fs.writeFileSync(sessionJsonPath, JSON.stringify(sessionJson, null, 2));
@@ -765,6 +798,15 @@ app.get('/api/session/:sessionId', (req, res) => {
 app.get('/api/session/:sessionId/audio', (req, res) => {
   const audioPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}.webm`);
   if (!fs.existsSync(audioPath)) return res.status(404).json({ error: 'Audio nicht gefunden' });
+  res.sendFile(audioPath);
+});
+
+// Abschnitts-Audio streamen (Classic: pro Abschnitt eine eigene Datei)
+app.get('/api/session/:sessionId/audio/:seg', (req, res) => {
+  const seg = parseInt(req.params.seg, 10);
+  if (isNaN(seg)) return res.status(400).json({ error: 'Ungültige Abschnittsnummer' });
+  const audioPath = path.join(CONFIG.OUTPUT_DIR, `${req.params.sessionId}-seg-${seg}.webm`);
+  if (!fs.existsSync(audioPath)) return res.status(404).json({ error: 'Abschnitts-Audio nicht gefunden' });
   res.sendFile(audioPath);
 });
 

@@ -96,7 +96,8 @@ function pickMimeType() {
 }
 
 // ── Recording ───────────────────────────────────────────────────────────────
-async function startRec() {
+async function startRec(opts) {
+  const startPaused = !!(opts && opts.startPaused);
   const stream = await getMicStream();
   state.isRec = true;
   state.isPaused = false;
@@ -129,20 +130,30 @@ async function startRec() {
   state.timerInterval = setInterval(() => {
     state.elapsed = Math.floor((Date.now() - state.sessionStart) / 1000);
     updateTimerDisplay();
+    updateWaveProgress();
   }, 500);
 
   createSegCard(state.segCount);
-  updateRecUI('rec');
   updateMeta();
+
+  if (startPaused) {
+    // Neuer Abschnitt startet im Hold-Modus (rot pulsierend) — User tippt zum Loslegen
+    await pauseRec();
+  } else {
+    updateRecUI('rec');
+  }
 }
 
 async function pauseRec() {
   if (!state.isRec) return;
   state.isRec = false;
   state.isPaused = true;
+  state._segmentPauseStart = Date.now();
   clearInterval(state.timerInterval);
-  if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-    state.mediaRecorder.pause();
+  // Mic stumm schalten statt MediaRecorder pausieren — vermeidet Chrome WebM-Container-Bug
+  // bei pause/resume in Kombination mit parallelem Audio-Playback.
+  if (state.stream) {
+    state.stream.getAudioTracks().forEach(t => t.enabled = false);
   }
   updateRecUI('paused');
   updateSegCardState();
@@ -164,6 +175,7 @@ async function finalizeCurrentSegment() {
 }
 
 function toggleRec() {
+  if (state._cuePlaying) return; // Während Wiedergabe-Overlay keine Toggles
   if (state.isRec) return pauseRec();
   if (state.isPaused) return resumeRec();
   return startRec();
@@ -174,7 +186,7 @@ function newSegment() {
   finalizeCurrentSegment().then(() => {
     updateRecUI('idle');
     updateMeta();
-    startRec();
+    startRec({ startPaused: true });
   });
 }
 
@@ -182,18 +194,33 @@ function newSegment() {
 async function cueBack(seconds) {
   if (!state.isRec && !state.isPaused && state.audioChunks.length === 0) return;
 
-  // MediaRecorder pausieren, User-Intent merken
-  state._cueResumeTo = state.isPaused ? 'paused' : (state.isRec ? 'rec' : 'idle');
-  if (state.isRec && state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-    state.mediaRecorder.pause();
-    clearInterval(state.timerInterval);
+  // Mic stumm schalten — MediaRecorder läuft durch (keine pause/resume-WebM-Bugs)
+  if (state.stream) {
+    state.stream.getAudioTracks().forEach(t => t.enabled = false);
   }
-  state.isRec = false;
-  state.isPaused = false;
+  state._cuePlaying = true;
+  // Timer stoppen, Pause-Zeit fürs Resume merken
+  if (state.isRec) {
+    clearInterval(state.timerInterval);
+    state._segmentPauseStart = Date.now();
+  }
 
   // Alle Chunks des aktuellen Segments zusammenbauen
   const chunks = state.audioChunks.slice();
-  if (chunks.length === 0) return;
+  if (chunks.length === 0) {
+    // Abbrechen — Mic wieder an, Timer neu starten falls REC
+    if (state.stream) state.stream.getAudioTracks().forEach(t => t.enabled = state.isRec);
+    state._cuePlaying = false;
+    state._segmentPauseStart = null;
+    if (state.isRec) {
+      state.timerInterval = setInterval(() => {
+        state.elapsed = Math.floor((Date.now() - state.sessionStart) / 1000);
+        updateTimerDisplay();
+        updateWaveProgress();
+      }, 500);
+    }
+    return;
+  }
 
   const blob = new Blob(chunks, { type: state.mimeType || 'audio/webm' });
   const url = URL.createObjectURL(blob);
@@ -202,7 +229,7 @@ async function cueBack(seconds) {
   const overlay = $('cue-overlay');
   const sub = $('cue-sub');
   const wave = $('cue-wave');
-  if (sub) sub.textContent = `Letzte ${seconds} Sekunden aus Segment ${state.segCount}…`;
+  if (sub) sub.textContent = `Letzte ${seconds} Sekunden aus Abschnitt ${state.segCount}…`;
   if (wave) wave.innerHTML = genCueWave();
   if (overlay) overlay.classList.add('active');
 
@@ -226,18 +253,21 @@ function cueBackStop() {
   }
   const overlay = $('cue-overlay');
   if (overlay) overlay.classList.remove('active');
+  state._cuePlaying = false;
+  state._segmentPauseStart = null;
 
-  // MediaRecorder war pausiert — wir beenden die Aufnahme komplett
-  if (state.mediaRecorder && state.mediaRecorder.state === 'paused') {
-    state.mediaRecorder.stop();
+  // Aktuellen Abschnitt sauber beenden (Recorder ist durchgängig gelaufen)
+  if (state.isRec || state.isPaused) {
+    finalizeCurrentSegment().then(() => {
+      updateRecUI('idle');
+      updateMeta();
+    });
+  } else {
+    // War bereits finalized — nur Mic-Zustand aufräumen
+    if (state.stream) state.stream.getAudioTracks().forEach(t => t.enabled = true);
+    updateRecUI('idle');
+    updateMeta();
   }
-  state.isRec = false;
-  state.isPaused = false;
-  state._cueResumeTo = null;
-  finalizeSegCard(state.currentSegId);
-  state.blocks.push({ type: 'text', text: '', segment: state.segCount });
-  updateRecUI('idle');
-  updateMeta();
 }
 
 function cueBackResume() {
@@ -247,33 +277,33 @@ function cueBackResume() {
   }
   const overlay = $('cue-overlay');
   if (overlay) overlay.classList.remove('active');
+  state._cuePlaying = false;
 
-  const target = state._cueResumeTo || 'rec';
-  state._cueResumeTo = null;
-
-  if (target === 'paused') {
-    // Benutzer war im Pause-Zustand — dorthin zurückkehren, nicht resumen
-    state.isRec = false;
-    state.isPaused = true;
-    updateRecUI('paused');
-    updateSegCardState();
+  // Recorder war bereits gestoppt? Dann neuen Abschnitt starten.
+  if (!state.mediaRecorder || state.mediaRecorder.state === 'inactive') {
+    state._segmentPauseStart = null;
+    startRec();
     return;
   }
 
-  if (state.mediaRecorder && state.mediaRecorder.state === 'paused') {
-    state.mediaRecorder.resume();
-    state.isRec = true;
-    state.isPaused = false;
-    state.timerInterval = setInterval(() => {
-      state.elapsed = Math.floor((Date.now() - state.sessionStart) / 1000);
-      updateTimerDisplay();
-    }, 500);
-    updateRecUI('rec');
-    updateSegCardState();
-  } else {
-    // Falls MediaRecorder schon gestoppt war → neue Aufnahme als selbes Segment fortsetzen
-    startRec();
+  // Recorder läuft durch — Mic wieder aktiv, State zurück auf REC (auch wenn vorher Pause)
+  if (state.stream) {
+    state.stream.getAudioTracks().forEach(t => t.enabled = true);
   }
+  if (state._segmentPauseStart && state.segmentStart) {
+    state.segmentStart += (Date.now() - state._segmentPauseStart);
+  }
+  state._segmentPauseStart = null;
+  state.isRec = true;
+  state.isPaused = false;
+  clearInterval(state.timerInterval);
+  state.timerInterval = setInterval(() => {
+    state.elapsed = Math.floor((Date.now() - state.sessionStart) / 1000);
+    updateTimerDisplay();
+    updateWaveProgress();
+  }, 500);
+  updateRecUI('rec');
+  updateSegCardState();
 }
 
 // "Anhoeren" vom Hauptbildschirm aus → ruft cueBack mit "bis zum Anfang"
@@ -346,8 +376,10 @@ function deleteSegment(segId) {
 async function openCamera() {
   if (state.segCount === 0) return;
 
-  if (state.isRec && state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-    state.mediaRecorder.pause();
+  if (state.isRec && state.stream) {
+    // Mic stumm statt MediaRecorder pausieren — konsistent mit Pause/Listen-Flow
+    state.stream.getAudioTracks().forEach(t => t.enabled = false);
+    state._segmentPauseStart = Date.now();
     clearInterval(state.timerInterval);
   }
 
@@ -425,7 +457,7 @@ function showPhotoReview(photo) {
 
   $('photo-title').textContent     = `Foto ${photo.timestamp ? formatTime(photo.timestamp) : ''}`;
   $('photo-time-sub').textContent  = `Aufgenommen bei ${formatTime(photo.timestamp)}`;
-  $('photo-review-meta').textContent = `Segment ${state.segCount}`;
+  $('photo-review-meta').textContent = `Abschnitt ${state.segCount}`;
 
   showScreen('photo');
 }
@@ -463,6 +495,15 @@ function resumeRec() {
   if (!state.isRec && !state.isPaused) return;
   state.isRec = true;
   state.isPaused = false;
+  // Pause-Dauer aus segmentStart herausrechnen, damit Waveform-Fortschritt nicht springt
+  if (state._segmentPauseStart && state.segmentStart) {
+    state.segmentStart += (Date.now() - state._segmentPauseStart);
+  }
+  state._segmentPauseStart = null;
+  // Mic wieder aktiv. Falls MediaRecorder noch aus Legacy-Pfaden paused ist, resumen.
+  if (state.stream) {
+    state.stream.getAudioTracks().forEach(t => t.enabled = true);
+  }
   if (state.mediaRecorder && state.mediaRecorder.state === 'paused') {
     state.mediaRecorder.resume();
   }
@@ -470,6 +511,7 @@ function resumeRec() {
   state.timerInterval = setInterval(() => {
     state.elapsed = Math.floor((Date.now() - state.sessionStart) / 1000);
     updateTimerDisplay();
+    updateWaveProgress();
   }, 500);
   updateRecUI('rec');
   updateSegCardState();
@@ -487,18 +529,33 @@ async function finalizeSession() {
   showScreen('send');
 
   try {
-    const audioBlob = new Blob(state.allChunks, { type: state.mimeType || 'audio/webm' });
+    const mimeType = state.mimeType || 'audio/webm';
+    const audioBlob = new Blob(state.allChunks, { type: mimeType });
+
+    // Pro Abschnitt ein eigenes Audio-File zusammenbauen (Reihenfolge nach Seg-Nummer)
+    const segmentNums = Object.keys(state.segmentChunks)
+      .map(n => parseInt(n, 10))
+      .filter(n => !isNaN(n) && state.segmentChunks[n] && state.segmentChunks[n].length > 0)
+      .sort((a, b) => a - b);
+    const segmentAudios = segmentNums.map(n => ({
+      seg: n,
+      blob: new Blob(state.segmentChunks[n], { type: mimeType }),
+    }));
 
     const formData = new FormData();
     formData.append('audio', audioBlob, 'session.webm');
+    segmentAudios.forEach(({ seg, blob }) => {
+      formData.append('audio_segments', blob, `segment-${seg}.webm`);
+    });
     formData.append('session', JSON.stringify({
       mode: 'classic',
       projectName: state.projectName,
       markers: state.markers,
       sessionId: state.sessionId,
+      segmentNumbers: segmentNums,
       orderedBlocks: state.blocks.map(b => {
-        if (b.type === 'photo') return { type: 'photo', photo: b.photo, timestamp: b.timestamp };
-        return { type: 'text', text: b.text || '' };
+        if (b.type === 'photo') return { type: 'photo', photo: b.photo, timestamp: b.timestamp, segment: b.segment };
+        return { type: 'text', text: b.text || '', segment: b.segment };
       }),
     }));
 
@@ -663,7 +720,7 @@ function updateTimerDisplay() {
 }
 
 function updateMeta() {
-  $('seg-count-meta').textContent = `${state.segCount} Segment${state.segCount!==1?'e':''}`;
+  $('seg-count-meta').textContent = `${state.segCount} Abschnitt${state.segCount!==1?'e':''}`;
   $('photo-count-meta').textContent = `${state.photoCount} Foto${state.photoCount!==1?'s':''}`;
   const isc = $('info-seg-count'); if (isc) isc.textContent = state.segCount;
   const ipt = $('info-photo-total'); if (ipt) ipt.textContent = state.photoCount;
@@ -695,7 +752,7 @@ function createSegCard(num) {
   card.innerHTML = `
     <div class="seg-card-header">
       <div class="seg-num active-num">${num}</div>
-      <span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--text2);flex:1;margin-left:4px">Segment ${num}</span>
+      <span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--text2);flex:1;margin-left:4px">Abschnitt ${num}</span>
       <span class="seg-dur" id="seg-${num}-dur">00:00</span>
     </div>
     <div class="seg-card-body">
@@ -705,6 +762,7 @@ function createSegCard(num) {
       </div>
     </div>`;
   card.addEventListener('click', (e) => {
+    if (state._cuePlaying) return;
     // Buttons im Footer (Abspielen/Löschen) nicht abfangen
     if (e.target.closest('button')) return;
     if (card.classList.contains('recording-active') || card.classList.contains('recording-paused')) {
@@ -745,10 +803,27 @@ function addPhotoThumbToSeg(segId, num, url) {
   container.appendChild(thumb);
 }
 
+const WAVE_BAR_COUNT = 40;
+const WAVE_SECONDS_PER_BAR = 1.5; // → 60s = volle Waveform
+
 function genWave() {
-  return Array.from({length:36}, () =>
+  return Array.from({length:WAVE_BAR_COUNT}, () =>
     `<div class="seg-wave-bar" style="height:${20+Math.random()*70}%"></div>`
   ).join('');
+}
+
+function updateWaveProgress() {
+  const segId = state.currentSegId;
+  if (!segId || !state.segmentStart) return;
+  const wave = $(`${segId}-wave`);
+  if (!wave) return;
+  const bars = wave.querySelectorAll('.seg-wave-bar');
+  if (!bars.length) return;
+  const segSec = (Date.now() - state.segmentStart) / 1000;
+  const filledCount = Math.min(bars.length, Math.floor(segSec / WAVE_SECONDS_PER_BAR));
+  for (let i = 0; i < bars.length; i++) {
+    if (i < filledCount) bars[i].classList.add('filled');
+  }
 }
 
 function genCueWave() {
@@ -820,7 +895,8 @@ async function sendEmail() {
 
 function resetApp() {
   Object.assign(state, {
-    isRec:false, isPaused:false, elapsed:0, segCount:0, photoCount:0,
+    isRec:false, isPaused:false, _cuePlaying:false, _segmentPauseStart:null,
+    elapsed:0, segCount:0, photoCount:0,
     currentSegId:null, pendingPhoto:null,
     markers:[], photos:[], blocks:[], allChunks:[], audioChunks:[],
     segmentChunks: {},

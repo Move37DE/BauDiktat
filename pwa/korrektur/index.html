@@ -91,6 +91,17 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);}
 .classic-hint{background:var(--bdim);border:1px solid rgba(74,143,212,0.3);border-radius:8px;padding:11px 14px;margin-bottom:14px;color:var(--blue);font-size:12px;line-height:1.55;display:flex;align-items:flex-start;gap:8px;}
 .classic-hint-icon{font-size:16px;flex-shrink:0;}
 .text-block-content.empty-placeholder:empty:before{content:attr(data-placeholder);color:var(--text3);font-style:italic;pointer-events:none;}
+.segment-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:18px;}
+.segment-card-header{font-family:'DM Mono',monospace;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+.segment-card-header .seg-num-pill{background:var(--adim);color:var(--accent);border:1px solid var(--adim2);border-radius:10px;padding:2px 8px;font-size:10px;font-weight:500;}
+.segment-player{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;}
+.segment-player .sp-play{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#111;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;}
+.segment-player .sp-play:hover{opacity:0.9;}
+.segment-player .sp-time{font-family:'DM Mono',monospace;font-size:10px;color:var(--text3);min-width:82px;}
+.segment-player .sp-seek{flex:1;height:6px;background:var(--surface2);border-radius:3px;position:relative;cursor:pointer;}
+.segment-player .sp-seek-progress{position:absolute;inset:0;width:0%;background:var(--accent);opacity:0.5;border-radius:3px;}
+.segment-player .sp-speed{background:var(--surface2);color:var(--text2);border:1px solid var(--border2);border-radius:5px;padding:4px 8px;font-family:'DM Mono',monospace;font-size:10px;cursor:pointer;}
+.segment-player .sp-speed:hover{background:var(--surface3);color:var(--text);}
 .btn-replace-photo{position:absolute;top:8px;right:8px;padding:6px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.7);color:#fff;font-family:'DM Sans',sans-serif;font-size:11px;cursor:pointer;opacity:0;transition:opacity 0.15s;backdrop-filter:blur(4px);display:flex;align-items:center;gap:4px;}
 .photo-block-wrap:hover .btn-replace-photo{opacity:1;}
 .btn-replace-photo:hover{background:rgba(0,0,0,0.9);border-color:var(--accent);color:var(--accent);}
@@ -323,9 +334,15 @@ async function loadSession(sessionId) {
       `${currentSession.projectName} | ${currentSession.dateFormatted}`;
     document.getElementById('status-session').textContent = sessionId.substring(0, 8);
 
-    // Load audio
-    audio.src = `${BACKEND}/api/session/${sessionId}/audio`;
-    document.getElementById('audio-bar').style.display = 'flex';
+    // Load audio — bei Classic mit Segment-Audios nutzen wir den globalen Player nicht
+    const isClassicWithSegs = currentSession.mode === 'classic' && Array.isArray(currentSession.segmentAudios) && currentSession.segmentAudios.length > 0;
+    if (isClassicWithSegs) {
+      audio.removeAttribute('src');
+      document.getElementById('audio-bar').style.display = 'none';
+    } else {
+      audio.src = `${BACKEND}/api/session/${sessionId}/audio`;
+      document.getElementById('audio-bar').style.display = 'flex';
+    }
     document.getElementById('editor-scroll').style.display = 'block';
     document.getElementById('editor-empty').style.display = 'none';
 
@@ -356,6 +373,9 @@ function renderBlocks() {
 
   // Classic-Mode Hinweis
   const isClassic = currentSession.mode === 'classic';
+  const segmentAudios = Array.isArray(currentSession.segmentAudios) ? currentSession.segmentAudios : [];
+  const hasSegmentAudios = isClassic && segmentAudios.length > 0;
+
   if (isClassic) {
     const hint = document.createElement('div');
     hint.className = 'classic-hint';
@@ -368,6 +388,51 @@ function renderBlocks() {
 
   let globalWordIdx = 0;
 
+  // Wenn Classic-Session mit Abschnitts-Audios: pro Abschnitt eine Karte mit eigenem Player.
+  if (hasSegmentAudios) {
+    const blocksBySeg = new Map();
+    const blockIdxMap = new Map();  // blockIdx-Tracking für edit-handler
+    currentBlocks.forEach((b, idx) => {
+      const seg = (b.segment != null) ? b.segment : 0;
+      if (!blocksBySeg.has(seg)) blocksBySeg.set(seg, []);
+      blocksBySeg.get(seg).push({ block: b, idx });
+    });
+
+    // Segment-Reihenfolge: zuerst die in segmentAudios, danach evtl. weitere aus blocks
+    const orderedSegs = [];
+    segmentAudios.forEach(sa => { if (!orderedSegs.includes(sa.seg)) orderedSegs.push(sa.seg); });
+    Array.from(blocksBySeg.keys())
+      .sort((a, b) => a - b)
+      .forEach(s => { if (!orderedSegs.includes(s)) orderedSegs.push(s); });
+
+    orderedSegs.forEach(seg => {
+      const segBlocks = blocksBySeg.get(seg) || [];
+      const audioInfo = segmentAudios.find(sa => sa.seg === seg);
+      const audioUrl = audioInfo ? `${BACKEND}/api/session/${currentSession.sessionId}/audio/${seg}` : null;
+
+      const card = document.createElement('div');
+      card.className = 'segment-card';
+
+      const header = document.createElement('div');
+      header.className = 'segment-card-header';
+      header.innerHTML = `<span class="seg-num-pill">Abschnitt ${seg}</span>`;
+      card.appendChild(header);
+
+      if (audioUrl) card.appendChild(renderSegmentPlayer(audioUrl));
+
+      segBlocks.forEach(({ block, idx }) => {
+        const el = (block.type === 'photo') ? renderPhotoBlock(block, idx) : renderTextBlock(block, idx, null);
+        card.appendChild(el);
+      });
+
+      container.appendChild(card);
+    });
+
+    wordElements = [];
+    return;
+  }
+
+  // Standard-Rendering (Pro oder Classic ohne Segment-Audios)
   currentBlocks.forEach((block, blockIdx) => {
     if (block.type === 'text') {
       const div = document.createElement('div');
@@ -508,6 +573,158 @@ function renderBlocks() {
 
   // Collect all word elements for highlighting
   wordElements = Array.from(container.querySelectorAll('.word'));
+}
+
+// ── Helpers für Segment-Rendering (Classic) ───────────────────────────────
+function renderTextBlock(block, blockIdx, sessionWordsCursor) {
+  // sessionWordsCursor nicht genutzt im Classic — Text wird leer sein, User tippt
+  const div = document.createElement('div');
+  div.className = 'text-block';
+  const content = document.createElement('div');
+  content.className = 'text-block-content';
+  content.contentEditable = 'true';
+  content.dataset.blockIdx = blockIdx;
+  content.textContent = block.text || '';
+  if (!block.text || block.text.trim() === '') {
+    content.classList.add('empty-placeholder');
+    content.dataset.placeholder = 'Audio abspielen und hier tippen…';
+  }
+  content.addEventListener('input', () => {
+    const text = content.innerText.trim();
+    currentBlocks[blockIdx].text = text;
+    isDirty = true;
+    updateDirtyState();
+    if (text.length > 0) content.classList.remove('empty-placeholder');
+    else content.classList.add('empty-placeholder');
+  });
+  div.appendChild(content);
+  return div;
+}
+
+function renderPhotoBlock(block, blockIdx) {
+  const div = document.createElement('div');
+  div.className = 'photo-block';
+  const header = document.createElement('div');
+  header.className = 'photo-block-header';
+  header.textContent = `Foto: ${block.photo}${block.timestamp != null ? ' [' + formatTime(block.timestamp) + ']' : ''}`;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'photo-block-wrap';
+  const img = document.createElement('img');
+  img.className = 'photo-block-img';
+  img.src = `${BACKEND}/api/session/${currentSession.sessionId}/photo/${block.photo}`;
+  img.alt = block.photo;
+  img.onerror = () => { img.style.display = 'none'; };
+
+  const replaceBtn = document.createElement('button');
+  replaceBtn.className = 'btn-replace-photo';
+  replaceBtn.innerHTML = '&#128247; Ersetzen';
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file'; fileInput.accept = 'image/*'; fileInput.style.display = 'none';
+  replaceBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    if (!fileInput.files[0]) return;
+    const fd = new FormData();
+    fd.append('photo', fileInput.files[0]);
+    try {
+      replaceBtn.textContent = 'Hochladen...';
+      const resp = await fetch(`${BACKEND}/api/session/${currentSession.sessionId}/photo/${block.photo}`, { method: 'POST', body: fd });
+      if (!resp.ok) throw new Error('Upload fehlgeschlagen');
+      img.src = `${BACKEND}/api/session/${currentSession.sessionId}/photo/${block.photo}?t=${Date.now()}`;
+      img.style.display = 'block';
+      isDirty = true; updateDirtyState();
+      showToast('Foto ersetzt', 'success');
+    } catch (err) {
+      showToast('Fehler: ' + err.message, 'error');
+    } finally {
+      replaceBtn.innerHTML = '&#128247; Ersetzen';
+    }
+  });
+  wrap.appendChild(img); wrap.appendChild(replaceBtn); wrap.appendChild(fileInput);
+
+  const caption = document.createElement('div');
+  caption.className = 'photo-block-caption';
+  const captionInput = document.createElement('input');
+  captionInput.type = 'text';
+  captionInput.value = block.caption || '';
+  captionInput.placeholder = 'Beschriftung hinzufuegen...';
+  captionInput.addEventListener('input', () => {
+    currentBlocks[blockIdx].caption = captionInput.value;
+    isDirty = true; updateDirtyState();
+  });
+  caption.appendChild(captionInput);
+
+  div.appendChild(header); div.appendChild(wrap); div.appendChild(caption);
+  return div;
+}
+
+const segSpeeds = [1.0, 1.25, 1.5, 0.75];
+function renderSegmentPlayer(audioUrl) {
+  const player = document.createElement('div');
+  player.className = 'segment-player';
+  const a = document.createElement('audio');
+  a.src = audioUrl;
+  a.preload = 'metadata';
+  let speedIdx = 0;
+
+  const btn = document.createElement('button');
+  btn.className = 'sp-play';
+  btn.innerHTML = '&#9654;';
+
+  const time = document.createElement('div');
+  time.className = 'sp-time';
+  time.textContent = '00:00 / 00:00';
+
+  const seek = document.createElement('div');
+  seek.className = 'sp-seek';
+  const seekProgress = document.createElement('div');
+  seekProgress.className = 'sp-seek-progress';
+  seek.appendChild(seekProgress);
+
+  const speedBtn = document.createElement('button');
+  speedBtn.className = 'sp-speed';
+  speedBtn.textContent = '1.0x';
+
+  btn.addEventListener('click', () => {
+    // Andere Segment-Player pausieren
+    document.querySelectorAll('.segment-player audio').forEach(other => {
+      if (other !== a) other.pause();
+    });
+    if (a.paused) { a.play(); btn.innerHTML = '&#10074;&#10074;'; }
+    else { a.pause(); btn.innerHTML = '&#9654;'; }
+  });
+  a.addEventListener('pause', () => { btn.innerHTML = '&#9654;'; });
+  a.addEventListener('play', () => { btn.innerHTML = '&#10074;&#10074;'; });
+  a.addEventListener('ended', () => { btn.innerHTML = '&#9654;'; });
+
+  a.addEventListener('timeupdate', () => {
+    const d = a.duration || 0;
+    const t = a.currentTime || 0;
+    time.textContent = `${formatTime(t)} / ${formatTime(d)}`;
+    seekProgress.style.width = (d ? (t / d) * 100 : 0) + '%';
+  });
+  a.addEventListener('loadedmetadata', () => {
+    time.textContent = `00:00 / ${formatTime(a.duration || 0)}`;
+  });
+
+  seek.addEventListener('click', (e) => {
+    const rect = seek.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    if (a.duration) a.currentTime = pct * a.duration;
+  });
+
+  speedBtn.addEventListener('click', () => {
+    speedIdx = (speedIdx + 1) % segSpeeds.length;
+    a.playbackRate = segSpeeds[speedIdx];
+    speedBtn.textContent = segSpeeds[speedIdx].toFixed(2).replace(/0$/, '') + 'x';
+  });
+
+  player.appendChild(btn);
+  player.appendChild(time);
+  player.appendChild(seek);
+  player.appendChild(speedBtn);
+  player.appendChild(a);
+  return player;
 }
 
 // ── Audio Player ──────────────────────────────────────────────────────────
