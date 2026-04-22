@@ -802,14 +802,22 @@ function highlightCurrentWord(time) {
 }
 
 // ── Save Correction ───────────────────────────────────────────────────────
-async function saveCorrection() {
+let saveInFlight = false;
+let autoSaveTimer = null;
+
+async function saveCorrection(opts) {
   if (!currentSession) return;
+  const silent = !!(opts && opts.silent);
+  if (saveInFlight) return;
+  saveInFlight = true;
 
   const btn = document.getElementById('btn-save');
   const origText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Speichert...';
-  setStatus('saving', 'Wird gespeichert...');
+  if (!silent) {
+    btn.disabled = true;
+    btn.textContent = 'Speichert...';
+  }
+  setStatus('saving', silent ? 'Automatisches Speichern…' : 'Wird gespeichert...');
 
   try {
     const resp = await fetch(`${BACKEND}/api/session/${currentSession.sessionId}/correct`, {
@@ -828,20 +836,53 @@ async function saveCorrection() {
     document.getElementById('btn-download').href = `${BACKEND}${result.downloadUrl}`;
 
     setStatus('saved', `Gespeichert um ${new Date().toLocaleTimeString('de-DE')}`);
-    showToast('Gespeichert! Neues DOCX generiert.', 'success');
+    if (!silent) showToast('Gespeichert! Neues DOCX generiert.', 'success');
 
     // Refresh session list to show corrected status
     loadSessions();
   } catch (err) {
     console.error('Speichern fehlgeschlagen:', err);
-    showToast('Fehler beim Speichern: ' + err.message, 'error');
+    if (!silent) showToast('Fehler beim Speichern: ' + err.message, 'error');
     setStatus('unsaved', 'Fehler beim Speichern');
   } finally {
-    btn.disabled = false;
-    btn.textContent = origText;
+    saveInFlight = false;
+    if (!silent) {
+      btn.disabled = !isDirty;
+      btn.textContent = origText;
+    }
   }
 }
 window.saveCorrection = saveCorrection;
+
+function scheduleAutoSave() {
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    if (isDirty && !saveInFlight) saveCorrection({ silent: true });
+  }, 1500);
+}
+
+// Vor Schließen/Wechsel warnen, wenn noch ungespeichert
+window.addEventListener('beforeunload', (e) => {
+  if (isDirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// Download-Button: bei isDirty erst speichern, dann downloaden
+document.addEventListener('DOMContentLoaded', () => {
+  const dl = document.getElementById('btn-download');
+  if (!dl) return;
+  dl.addEventListener('click', async (e) => {
+    if (!isDirty) return; // Normaler Download
+    e.preventDefault();
+    await saveCorrection();
+    // Programmatischer Download via temp-Anchor (umgeht den Listener)
+    const a = document.createElement('a');
+    a.href = dl.href;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+});
 
 // ── UI Helpers ────────────────────────────────────────────────────────────
 function updateDirtyState() {
@@ -849,6 +890,7 @@ function updateDirtyState() {
   btn.disabled = !isDirty;
   if (isDirty) {
     setStatus('unsaved', 'Ungespeicherte Aenderungen');
+    scheduleAutoSave();
   }
 }
 

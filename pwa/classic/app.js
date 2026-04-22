@@ -166,8 +166,14 @@ async function finalizeCurrentSegment() {
   clearInterval(state.timerInterval);
 
   if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
-    state.mediaRecorder.stop();
-    await delay(300);
+    const mr = state.mediaRecorder;
+    // Auf echtes stop-Event warten — laut W3C feuert ondataavailable mit dem letzten Chunk
+    // GARANTIERT vor dem stop-Event. So verlieren wir keine Wortenden mehr.
+    await new Promise(resolve => {
+      mr.addEventListener('stop', () => setTimeout(resolve, 30), { once: true });
+      try { if (mr.requestData && mr.state === 'recording') mr.requestData(); } catch (e) {}
+      mr.stop();
+    });
   }
 
   finalizeSegCard(state.currentSegId);
