@@ -78,7 +78,9 @@ async function getMicStream() {
   if (state.stream) return state.stream;
   try {
     state.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 }
+      // Alle Browser-DSP-Filter AUS — wir nehmen roh auf, was ans Mic kommt.
+      // noiseSuppression frisst erfahrungsgemäß Wortanfänge/Atempausen → "zerhackt"-Effekt.
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 16000 }
     });
     return state.stream;
   } catch (err) {
@@ -150,10 +152,11 @@ async function pauseRec() {
   state.isPaused = true;
   state._segmentPauseStart = Date.now();
   clearInterval(state.timerInterval);
-  // Mic stumm schalten statt MediaRecorder pausieren — vermeidet Chrome WebM-Container-Bug
-  // bei pause/resume in Kombination mit parallelem Audio-Playback.
-  if (state.stream) {
-    state.stream.getAudioTracks().forEach(t => t.enabled = false);
+  // Echte Pause des MediaRecorders — Stille wird NICHT mit aufgenommen.
+  // Der Chrome WebM-Container-Bug tritt nur bei pause/resume + parallelem Audio-Playback auf
+  // (siehe Cue-Back-Flow), hier haben wir kein Playback, also safe.
+  if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
+    try { state.mediaRecorder.pause(); } catch (e) {}
   }
   updateRecUI('paused');
   updateSegCardState();

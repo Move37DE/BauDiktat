@@ -103,8 +103,11 @@ async function getMicStream() {
   try {
     state.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
+        // Alle Browser-DSP-Filter AUS — wir nehmen roh auf, was ans Mic kommt.
+        // noiseSuppression frisst erfahrungsgemäß Wortanfänge/Atempausen → "zerhackt"-Effekt.
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
         sampleRate: 16000,
       }
     });
