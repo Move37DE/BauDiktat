@@ -190,6 +190,15 @@ function toggleRec() {
   return startRec();
 }
 
+async function stopRec() {
+  // Beendet den laufenden Abschnitt sauber und geht in idle → Foto-Button wird freigeschaltet.
+  if (state._cuePlaying) return;
+  if (!state.isRec && !state.isPaused) return;
+  await finalizeCurrentSegment();
+  updateRecUI('idle');
+  updateMeta();
+}
+
 function newSegment() {
   if (!state.isRec && !state.isPaused) return;
   finalizeCurrentSegment().then(() => {
@@ -384,13 +393,9 @@ function deleteSegment(segId) {
 // ── Foto aufnehmen ──────────────────────────────────────────────────────────
 async function openCamera() {
   if (state.segCount === 0) return;
-
-  if (state.isRec && state.stream) {
-    // Mic stumm statt MediaRecorder pausieren — konsistent mit Pause/Listen-Flow
-    state.stream.getAudioTracks().forEach(t => t.enabled = false);
-    state._segmentPauseStart = Date.now();
-    clearInterval(state.timerInterval);
-  }
+  // Strikte Führung: Foto nur nach Stop. Aufnahme läuft/pausiert → abbrechen.
+  // UI sperrt den Button schon, dieser Guard schützt gegen Tastatur- oder Script-Trigger.
+  if (state.isRec || state.isPaused) return;
 
   try {
     state.cameraStream = await navigator.mediaDevices.getUserMedia({
@@ -660,7 +665,9 @@ function updateRecUI(mode) {
   if (mode === 'rec') {
     btn.className = 'btn btn-rec';
     btn.innerHTML = '\u23F8 Pause';
-    $('btn-photo').disabled = false;
+    // Foto NUR nach Stop — während Aufnahme/Pause gesperrt, damit User klar geführt wird.
+    $('btn-photo').disabled = true;
+    const bs = $('btn-stop'); if (bs) bs.disabled = false;
     $('btn-seg').disabled = false;
     $('btn-cue10').disabled = false;
     $('btn-cue5').disabled = false;
@@ -674,7 +681,9 @@ function updateRecUI(mode) {
   } else if (mode === 'paused') {
     btn.className = 'btn btn-rec paused';
     btn.innerHTML = '\u23FA Weiter aufnehmen';
-    $('btn-photo').disabled = false;
+    // Foto NUR nach Stop — Pause heißt "kurz anhalten, weiter diktieren", nicht "jetzt fotografieren".
+    $('btn-photo').disabled = true;
+    const bs = $('btn-stop'); if (bs) bs.disabled = false;
     $('btn-seg').disabled = false;
     $('btn-cue10').disabled = false;
     $('btn-cue5').disabled = false;
@@ -689,6 +698,7 @@ function updateRecUI(mode) {
     btn.className = 'btn btn-rec';
     btn.innerHTML = '\u23FA Aufnehmen';
     $('btn-photo').disabled = !has;
+    const bs = $('btn-stop'); if (bs) bs.disabled = true;
     $('btn-seg').disabled = true;
     $('btn-cue10').disabled = true;
     $('btn-cue5').disabled = true;
@@ -981,6 +991,7 @@ function updateProjectNameDisplay() {
 
 // ── Globale Exports ─────────────────────────────────────────────────────────
 window.startRec         = toggleRec;
+window.stopRec          = stopRec;
 window.openCamera       = openCamera;
 window.capturePhoto     = capturePhoto;
 window.keepPhoto        = keepPhoto;

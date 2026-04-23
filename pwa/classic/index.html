@@ -119,7 +119,9 @@ body{
 .btn-cue:disabled{opacity:0.28;cursor:not-allowed;}
 .btn-photo{background:var(--adim2);color:var(--accent);border:1px solid rgba(224,154,26,0.35);}
 .btn-photo:hover{background:rgba(224,154,26,0.35);}
-.btn-photo:disabled,.btn-new-seg:disabled,.btn-listen:disabled{opacity:0.28;cursor:not-allowed;}
+.btn-photo:disabled,.btn-new-seg:disabled,.btn-listen:disabled,.btn-stop:disabled{opacity:0.28;cursor:not-allowed;}
+.btn-stop{background:var(--surface2);color:var(--text);border:1px solid var(--border2);}
+.btn-stop:hover:not(:disabled){background:var(--surface);border-color:rgba(217,79,58,0.5);color:var(--red);}
 .btn-new-seg{background:var(--surface);color:var(--text2);border:1px solid var(--border2);font-size:11px;}
 .btn-new-seg:hover{background:var(--surface2);color:var(--text);}
 .btn-listen{background:var(--surface);color:var(--text2);border:1px solid var(--border2);font-size:11px;}
@@ -267,6 +269,9 @@ body{
     <div class="controls">
       <div class="btn-row">
         <button class="btn btn-rec" id="btn-rec" onclick="window.startRec()">⏺ Aufnehmen</button>
+        <button class="btn btn-stop" id="btn-stop" disabled onclick="window.stopRec()">⏹ Stop</button>
+      </div>
+      <div class="btn-row">
         <button class="btn btn-photo" id="btn-photo" disabled onclick="window.openCamera()">📷 Foto</button>
       </div>
       <div class="btn-row">
