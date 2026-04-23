@@ -13,6 +13,10 @@ const BACKEND = window.location.origin;
 const state = {
   isRec:           false,
   isPaused:        false,
+  // segmentOpen=true bedeutet: aktuelles Segment ist nach Stop resumable
+  // (MediaRecorder pausiert, Card mit Play/Löschen-Footer, aber nicht truly finalized).
+  // Erst "Neuer Abschnitt" oder Session-Send schließt das Segment hart.
+  segmentOpen:     false,
   // Audio
   mediaRecorder:   null,
   audioChunks:     [],          // Chunks des aktuellen Segments
@@ -44,6 +48,11 @@ const state = {
   cueAudio:        null,
   listeningSegId:  null,        // aktiv abgespieltes Segment (fuer UI)
   listenAudio:     null,
+  // Playback-Positionen pro Segment (fuer Resume nach Stop)
+  segmentPlaybackTime: {},      // { [segNum]: seconds }
+  segmentWaveFilled: {},        // { [segNum]: filledBarCount } — Endzustand der Wellenform
+  _listenSegNum:   null,        // gerade abgespieltes Segment
+  _wavePlaybackRaf: null,       // requestAnimationFrame-Handle fuer Wave-Update
 };
 
 // ── DOM Refs ─────────────────────────────────────────────────────────────────
@@ -99,10 +108,19 @@ function pickMimeType() {
 
 // ── Recording ───────────────────────────────────────────────────────────────
 async function startRec(opts) {
+  // Bereits aufnehmen? Ignorieren.
+  if (state.isRec || state.isPaused) return;
+
+  // Wenn ein Segment offen ist (soft-gestoppt), weiter darin aufnehmen statt neues zu erzeugen.
+  if (state.segmentOpen && state.currentSegId) {
+    return resumeSegmentRecording();
+  }
+
   const startPaused = !!(opts && opts.startPaused);
   const stream = await getMicStream();
   state.isRec = true;
   state.isPaused = false;
+  state.segmentOpen = true;
   state.sessionStart = state.sessionStart || Date.now();
   state.segmentStart = Date.now();
   state.segCount++;
@@ -162,11 +180,37 @@ async function pauseRec() {
   updateSegCardState();
 }
 
-async function finalizeCurrentSegment() {
+// Soft-Stop: Pausiert den Recorder (echte mediaRecorder.pause(), keine Stille-Frames),
+// markiert die Card visuell als "erledigt" (mit Play/Löschen-Footer). Segment bleibt offen
+// → nächster Aufnehmen-Klick führt darin weiter.
+async function softStopCurrentSegment() {
   if (!state.isRec && !state.isPaused) return;
   state.isRec = false;
   state.isPaused = false;
+  state._segmentPauseStart = Date.now();  // für segmentStart-Korrektur bei Resume
   clearInterval(state.timerInterval);
+
+  if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
+    try { state.mediaRecorder.pause(); } catch (e) {}
+  }
+  // Card bekommt Play/Löschen-Footer (ist idempotent, falls schon finalized).
+  finalizeSegCard(state.currentSegId);
+  // state.segmentOpen bleibt true — Segment ist resumable.
+}
+
+// Hard-Finalize: Segment definitiv beenden. Recorder wirklich stoppen,
+// letzten Chunk abwarten, Text-Block anlegen. Wird von "Neuer Abschnitt" und
+// "Session senden" aufgerufen.
+async function finalizeCurrentSegment() {
+  if (!state.isRec && !state.isPaused && !state.segmentOpen) return;
+
+  // Wenn noch rec/paused: erst visuell finalisieren (Card-Footer), Timer stoppen.
+  if (state.isRec || state.isPaused) {
+    state.isRec = false;
+    state.isPaused = false;
+    clearInterval(state.timerInterval);
+    finalizeSegCard(state.currentSegId);
+  }
 
   if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
     const mr = state.mediaRecorder;
@@ -174,13 +218,64 @@ async function finalizeCurrentSegment() {
     // GARANTIERT vor dem stop-Event. So verlieren wir keine Wortenden mehr.
     await new Promise(resolve => {
       mr.addEventListener('stop', () => setTimeout(resolve, 30), { once: true });
-      try { if (mr.requestData && mr.state === 'recording') mr.requestData(); } catch (e) {}
+      try { if (mr.requestData && (mr.state === 'recording' || mr.state === 'paused')) mr.requestData(); } catch (e) {}
       mr.stop();
     });
   }
 
-  finalizeSegCard(state.currentSegId);
   state.blocks.push({ type: 'text', text: '', segment: state.segCount });
+  state.segmentOpen = false;
+}
+
+// Resume: aus Soft-Stop zurück in aktive Aufnahme, gleiches Segment.
+async function resumeSegmentRecording() {
+  if (!state.segmentOpen || !state.currentSegId) return;
+  if (state.isRec || state.isPaused) return;
+
+  // Sicherstellen dass Stream & Recorder noch leben (nach Soft-Stop beides der Fall).
+  if (!state.mediaRecorder || state.mediaRecorder.state === 'inactive') {
+    // Falls doch inaktiv (z. B. nach Tab-Suspension) → neues Segment ist die beste Option.
+    // Aber: Chunks beibehalten wäre komplex, deshalb hier einfach neu starten.
+    // Für jetzt: kein Resume möglich, einfach return und User informieren.
+    console.warn('[Resume] MediaRecorder inaktiv, Resume nicht möglich.');
+    return;
+  }
+
+  state.isRec = true;
+  state.isPaused = false;
+
+  // Card zurück auf aktiv: Footer entfernen, recording-active wieder rauf.
+  const card = $(state.currentSegId);
+  if (card) {
+    card.classList.add('recording-active');
+    card.classList.remove('recording-paused');
+    card.setAttribute('data-toggle-hint', 'TAP = PAUSE');
+    card.querySelector('.seg-num')?.classList.add('active-num');
+    const footer = card.querySelector('.seg-card-footer');
+    if (footer) footer.remove();
+  }
+
+  // Gestoppte Zeit aus segmentStart herausrechnen — Timer/Wave laufen korrekt weiter.
+  if (state._segmentPauseStart && state.segmentStart) {
+    state.segmentStart += (Date.now() - state._segmentPauseStart);
+  }
+  state._segmentPauseStart = null;
+
+  // MediaRecorder weiterlaufen lassen.
+  if (state.mediaRecorder.state === 'paused') {
+    try { state.mediaRecorder.resume(); } catch (e) {}
+  }
+
+  // Timer wieder starten.
+  state.timerInterval = setInterval(() => {
+    state.elapsed = Math.floor((Date.now() - state.sessionStart) / 1000);
+    updateTimerDisplay();
+    updateWaveProgress();
+  }, 500);
+
+  updateRecUI('rec');
+  updateSegCardState();
+  updateMeta();
 }
 
 function toggleRec() {
@@ -190,22 +285,37 @@ function toggleRec() {
   return startRec();
 }
 
+function togglePause() {
+  // Pause-Button steuert nur rec ↔ paused, nicht den Start aus idle.
+  if (state._cuePlaying) return;
+  if (state.isRec) return pauseRec();
+  if (state.isPaused) return resumeRec();
+  // idle: nichts zu pausieren (Button ist auch disabled)
+}
+
 async function stopRec() {
-  // Beendet den laufenden Abschnitt sauber und geht in idle → Foto-Button wird freigeschaltet.
+  // Soft-Stop: Abschnitt visuell beenden, aber resumable lassen.
+  // → nächster Aufnehmen-Klick führt im selben Abschnitt weiter.
+  // Truly beendet wird erst durch "Neuer Abschnitt" oder "Session senden".
   if (state._cuePlaying) return;
   if (!state.isRec && !state.isPaused) return;
-  await finalizeCurrentSegment();
+  await softStopCurrentSegment();
   updateRecUI('idle');
   updateMeta();
 }
 
-function newSegment() {
-  if (!state.isRec && !state.isPaused) return;
-  finalizeCurrentSegment().then(() => {
+async function newSegment() {
+  if (state._cuePlaying) return;
+  // Schließt das aktuelle Segment hart und startet ein neues.
+  // Aus rec/paused: finalize + neue Aufnahme.
+  // Aus idle+segmentOpen (nach Stop): recorder hart stoppen, Text-Block anlegen, neue Aufnahme.
+  // Aus truly idle: einfach neue Aufnahme.
+  if (state.isRec || state.isPaused || state.segmentOpen) {
+    await finalizeCurrentSegment();
     updateRecUI('idle');
     updateMeta();
-    startRec({ startPaused: true });
-  });
+  }
+  await startRec();
 }
 
 // ── Cue-Back ────────────────────────────────────────────────────────────────
@@ -336,25 +446,61 @@ function listenLast() {
 }
 
 // ── Segment-Playback ────────────────────────────────────────────────────────
-function playSegment(segId, btn) {
-  const segNum = parseInt(segId.replace('seg-', ''), 10);
-  const chunks = state.segmentChunks[segNum];
-  if (!chunks || chunks.length === 0) return;
+function resetWaveToFinalized(segNum, wave) {
+  // Setzt die Wellenform auf den Endzustand nach Aufnahme zurueck.
+  // filledCount = Anzahl Bars, die nach Recording filled waren (entspricht Segment-Dauer).
+  if (!wave) return;
+  const bars = wave.querySelectorAll('.seg-wave-bar');
+  const maxFilled = state.segmentWaveFilled[segNum];
+  // Fallback: wenn nicht gespeichert, zaehlen wie viele aktuell filled sind (nicht 0 setzen).
+  const filledCount = (typeof maxFilled === 'number')
+    ? maxFilled
+    : wave.querySelectorAll('.seg-wave-bar.filled').length;
+  for (let i = 0; i < bars.length; i++) {
+    bars[i].classList.toggle('filled', i < filledCount);
+  }
+}
 
-  // Laufende Wiedergabe stoppen
+function stopPlayback(opts) {
+  // Stoppt aktuelle Wiedergabe. opts.savePosition=true → currentTime fuer Resume merken.
+  const save = !!(opts && opts.savePosition);
   if (state.listenAudio) {
-    state.listenAudio.pause();
+    if (save && state._listenSegNum != null) {
+      const t = state.listenAudio.currentTime || 0;
+      state.segmentPlaybackTime[state._listenSegNum] = t;
+    }
+    try { state.listenAudio.pause(); } catch (e) {}
     state.listenAudio = null;
+  }
+  if (state._wavePlaybackRaf) {
+    cancelAnimationFrame(state._wavePlaybackRaf);
+    state._wavePlaybackRaf = null;
   }
   document.querySelectorAll('.seg-card.playing').forEach(c => {
     c.classList.remove('playing');
     const b = c.querySelector('.seg-action');
     if (b) b.textContent = '\u25B6 Abspielen';
+    // Wave auf Recording-Endzustand zurueck (nicht alle filled!)
+    const sId = c.id;
+    const sNum = parseInt(sId.replace('seg-', ''), 10);
+    resetWaveToFinalized(sNum, c.querySelector('.seg-waveform'));
   });
+  state._listenSegNum = null;
+}
+
+function playSegment(segId, btn) {
+  const segNum = parseInt(segId.replace('seg-', ''), 10);
+  const chunks = state.segmentChunks[segNum];
+  if (!chunks || chunks.length === 0) return;
 
   const card = $(segId);
   const wasPlaying = card?.classList.contains('playing');
-  if (wasPlaying) return;  // war aktive Karte → jetzt gestoppt
+
+  // Laufende Wiedergabe stoppen — dabei Position sichern, damit naechstes Play resumen kann.
+  stopPlayback({ savePosition: true });
+
+  // Zweites Tappen auf derselben Karte = Stop (Position ist jetzt gemerkt).
+  if (wasPlaying) return;
 
   if (card) card.classList.add('playing');
   if (btn) btn.textContent = '\u23F9 Stop';
@@ -363,12 +509,63 @@ function playSegment(segId, btn) {
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
   state.listenAudio = audio;
-  audio.play().catch(() => {});
+  state._listenSegNum = segNum;
+
+  const wave = $(`${segId}-wave`);
+  const bars = wave ? wave.querySelectorAll('.seg-wave-bar') : [];
+  // Endzustand (max. filled-Count) fuer Progress-Begrenzung.
+  const maxFilled = (typeof state.segmentWaveFilled[segNum] === 'number')
+    ? state.segmentWaveFilled[segNum]
+    : bars.length;
+  // Wave zurueck auf leer, wandert dann mit Playback mit.
+  bars.forEach(b => b.classList.remove('filled'));
+
+  const savedPos = state.segmentPlaybackTime[segNum] || 0;
+
+  // Zeitbasiertes Fortschritts-Rendering — unabhaengig von audio.duration
+  // (WebM-Blobs vom MediaRecorder haben oft duration=Infinity).
+  // Dieselbe Skala wie bei Recording: 1 Bar pro WAVE_SECONDS_PER_BAR Sekunden.
+  const tick = () => {
+    if (state.listenAudio !== audio) return; // abgebrochen
+    if (bars.length) {
+      const t = audio.currentTime || 0;
+      const filledCount = Math.min(maxFilled, Math.floor(t / WAVE_SECONDS_PER_BAR));
+      for (let i = 0; i < bars.length; i++) {
+        bars[i].classList.toggle('filled', i < filledCount);
+      }
+    }
+    state._wavePlaybackRaf = requestAnimationFrame(tick);
+  };
+
+  // Seek auf gespeicherte Resume-Position — auch bei duration=Infinity zulaessig.
+  const startPlay = () => {
+    if (savedPos > 0.05) {
+      try { audio.currentTime = savedPos; } catch (e) {}
+    }
+    audio.play().catch(() => {});
+    state._wavePlaybackRaf = requestAnimationFrame(tick);
+  };
+  // Falls metadata noch nicht da: warten. Sonst direkt los.
+  if (audio.readyState >= 1) {
+    startPlay();
+  } else {
+    audio.addEventListener('loadedmetadata', startPlay, { once: true });
+  }
+
   audio.addEventListener('ended', () => {
     if (card) card.classList.remove('playing');
     if (btn) btn.textContent = '\u25B6 Abspielen';
     URL.revokeObjectURL(url);
     state.listenAudio = null;
+    state._listenSegNum = null;
+    // Komplett durchgespielt → Resume-Position zuruecksetzen, naechstes Play startet bei 0.
+    state.segmentPlaybackTime[segNum] = 0;
+    if (state._wavePlaybackRaf) {
+      cancelAnimationFrame(state._wavePlaybackRaf);
+      state._wavePlaybackRaf = null;
+    }
+    // Wave auf Recording-Endzustand.
+    resetWaveToFinalized(segNum, wave);
   });
 }
 
@@ -376,16 +573,31 @@ function deleteSegment(segId) {
   const card = $(segId);
   if (!card) return;
   const segNum = parseInt(segId.replace('seg-', ''), 10);
+
+  // Wenn das aktuell offene (soft-gestoppte) Segment gelöscht wird:
+  // Recorder hart stoppen und segmentOpen resetten, sonst hängt der paused Recorder.
+  if (state.segmentOpen && state.currentSegId === segId) {
+    if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
+      try { state.mediaRecorder.stop(); } catch (e) {}
+    }
+    state.segmentOpen = false;
+    state.currentSegId = null;
+  }
+
   card.style.cssText += 'opacity:0;transform:translateX(20px);transition:all 0.2s';
   setTimeout(() => {
     card.remove();
     // Segment-Chunks entfernen (aber allChunks lassen wir in Ruhe — zu komplex)
     delete state.segmentChunks[segNum];
+    if (state.segmentPlaybackTime) delete state.segmentPlaybackTime[segNum];
+    if (state.segmentWaveFilled)  delete state.segmentWaveFilled[segNum];
     // Blocks dieses Segments entfernen
     state.blocks = state.blocks.filter(b => b.segment !== segNum);
     // Photos dieses Segments entfernen
     state.photos = state.photos.filter(p => p.segNum !== segNum);
     state.markers = state.markers.filter(m => m.segNum !== segNum);
+    // Button-Zustände neu bewerten (Foto/Neuer-Abschnitt evtl. jetzt disabled wenn segCount=0).
+    updateRecUI('idle');
     updateMeta();
   }, 200);
 }
@@ -533,8 +745,8 @@ function resumeRec() {
 
 // ── Session finalisieren & senden ───────────────────────────────────────────
 async function finalizeSession() {
-  // Offenes oder pausiertes Segment vor dem Senden sauber beenden
-  if (state.isRec || state.isPaused) {
+  // Offenes / pausiertes / soft-gestopptes Segment vor dem Senden hart beenden.
+  if (state.isRec || state.isPaused || state.segmentOpen) {
     await finalizeCurrentSegment();
     updateRecUI('idle');
     updateMeta();
@@ -660,18 +872,22 @@ function updateRecUI(mode) {
 
   const btn = $('btn-rec');
   if (!btn) return;
+  const bPause = $('btn-pause');
+  const bStop = $('btn-stop');
   const has = state.segCount > 0;
 
+  // Ampel-Prinzip: Rec-Button immer grün "Aufnehmen", Stop immer rot, Pause immer gelb.
+  // Nur enabled/disabled ändert sich je nach State — Farben und Labels bleiben stabil.
+  btn.className = 'btn btn-rec';
+  btn.innerHTML = '\u23FA Aufnehmen';
+
   if (mode === 'rec') {
-    btn.className = 'btn btn-rec';
-    btn.innerHTML = '\u23F8 Pause';
+    btn.disabled = true;
+    if (bPause) { bPause.disabled = false; bPause.innerHTML = '\u23F8 Pause'; }
+    if (bStop)  bStop.disabled = false;
     // Foto NUR nach Stop — während Aufnahme/Pause gesperrt, damit User klar geführt wird.
     $('btn-photo').disabled = true;
-    const bs = $('btn-stop'); if (bs) bs.disabled = false;
     $('btn-seg').disabled = false;
-    $('btn-cue10').disabled = false;
-    $('btn-cue5').disabled = false;
-    $('btn-listen').disabled = false;
     $('btn-send').disabled = true;
     $('btn-send').className = 'btn btn-send';
     $('status-badge').className = 'header-badge rec';
@@ -679,15 +895,11 @@ function updateRecUI(mode) {
     const dr = $('dot-rec'); if (dr) dr.className = 'state-dot on';
     $('seg-empty').style.display = 'none';
   } else if (mode === 'paused') {
-    btn.className = 'btn btn-rec paused';
-    btn.innerHTML = '\u23FA Weiter aufnehmen';
-    // Foto NUR nach Stop — Pause heißt "kurz anhalten, weiter diktieren", nicht "jetzt fotografieren".
+    btn.disabled = true;
+    if (bPause) { bPause.disabled = false; bPause.innerHTML = '\u23F5 Weiter'; }
+    if (bStop)  bStop.disabled = false;
     $('btn-photo').disabled = true;
-    const bs = $('btn-stop'); if (bs) bs.disabled = false;
     $('btn-seg').disabled = false;
-    $('btn-cue10').disabled = false;
-    $('btn-cue5').disabled = false;
-    $('btn-listen').disabled = false;
     $('btn-send').disabled = !has;
     $('btn-send').className = has ? 'btn btn-send ready' : 'btn btn-send';
     $('status-badge').className = 'header-badge';
@@ -695,14 +907,13 @@ function updateRecUI(mode) {
     const dr = $('dot-rec'); if (dr) dr.className = 'state-dot';
     const dry = $('dot-ready'); if (dry) dry.className = has ? 'state-dot ready' : 'state-dot';
   } else { // idle
-    btn.className = 'btn btn-rec';
-    btn.innerHTML = '\u23FA Aufnehmen';
+    btn.disabled = false;
+    if (bPause) { bPause.disabled = true; bPause.innerHTML = '\u23F8 Pause'; }
+    if (bStop)  bStop.disabled = true;
     $('btn-photo').disabled = !has;
-    const bs = $('btn-stop'); if (bs) bs.disabled = true;
-    $('btn-seg').disabled = true;
-    $('btn-cue10').disabled = true;
-    $('btn-cue5').disabled = true;
-    $('btn-listen').disabled = !has;
+    // Neuer Abschnitt: aktiv sobald ein Segment existiert — auch aus idle (nach Stop),
+    // damit der User bewusst auf "Neuer Abschnitt" tippen muss, um einen echten Schnitt zu machen.
+    $('btn-seg').disabled = !has;
     $('btn-send').disabled = !has;
     $('btn-send').className = has ? 'btn btn-send ready' : 'btn btn-send';
     $('status-badge').className = 'header-badge';
@@ -798,6 +1009,13 @@ function finalizeSegCard(segId) {
   card.classList.remove('recording-active', 'recording-paused');
   card.removeAttribute('data-toggle-hint');
   card.querySelector('.seg-num')?.classList.remove('active-num');
+  // Endzustand der Wellenform merken — so koennen wir nach Playback-Stop exakt diesen
+  // Zustand wiederherstellen (und nicht alle Bars auf filled setzen).
+  const segNum = parseInt(segId.replace('seg-', ''), 10);
+  const wave = card.querySelector('.seg-waveform');
+  if (wave) {
+    state.segmentWaveFilled[segNum] = wave.querySelectorAll('.seg-wave-bar.filled').length;
+  }
   if (!card.querySelector('.seg-card-footer')) {
     const footer = document.createElement('div');
     footer.className = 'seg-card-footer';
@@ -914,11 +1132,11 @@ async function sendEmail() {
 
 function resetApp() {
   Object.assign(state, {
-    isRec:false, isPaused:false, _cuePlaying:false, _segmentPauseStart:null,
+    isRec:false, isPaused:false, segmentOpen:false, _cuePlaying:false, _segmentPauseStart:null,
     elapsed:0, segCount:0, photoCount:0,
     currentSegId:null, pendingPhoto:null,
     markers:[], photos:[], blocks:[], allChunks:[], audioChunks:[],
-    segmentChunks: {},
+    segmentChunks: {}, segmentPlaybackTime: {}, segmentWaveFilled: {},
     sessionId: crypto.randomUUID(),
     sessionStart: null, segmentStart: null,
   });
@@ -991,6 +1209,7 @@ function updateProjectNameDisplay() {
 
 // ── Globale Exports ─────────────────────────────────────────────────────────
 window.startRec         = toggleRec;
+window.togglePause      = togglePause;
 window.stopRec          = stopRec;
 window.openCamera       = openCamera;
 window.capturePhoto     = capturePhoto;

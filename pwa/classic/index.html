@@ -111,19 +111,20 @@ body{
 .controls{padding:10px 14px 22px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:7px;flex-shrink:0;}
 .btn-row{display:flex;gap:7px;}
 .btn{flex:1;padding:10px 8px;border-radius:8px;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;transition:all 0.15s;display:flex;align-items:center;justify-content:center;gap:5px;}
-.btn-rec{background:var(--red);color:#fff;}
-.btn-rec:hover{background:#c44430;}
-.btn-rec.paused{background:var(--surface);color:var(--red);border:1px solid rgba(217,79,58,0.4);}
+.btn-rec{background:var(--green);color:#fff;border:none;}
+.btn-rec:hover:not(:disabled){background:#45a05e;}
+.btn-pause{background:#e8c547;color:#1a1a16;border:1px solid #c9a832;}
+.btn-pause:hover:not(:disabled){background:#f0d260;}
 .btn-cue{background:var(--bdim);color:var(--blue);border:1px solid rgba(74,143,212,0.3);font-size:11px;}
 .btn-cue:hover:not(:disabled){background:rgba(74,143,212,0.22);}
 .btn-cue:disabled{opacity:0.28;cursor:not-allowed;}
 .btn-photo{background:var(--adim2);color:var(--accent);border:1px solid rgba(224,154,26,0.35);}
 .btn-photo:hover{background:rgba(224,154,26,0.35);}
-.btn-photo:disabled,.btn-new-seg:disabled,.btn-listen:disabled,.btn-stop:disabled{opacity:0.28;cursor:not-allowed;}
-.btn-stop{background:var(--surface2);color:var(--text);border:1px solid var(--border2);}
-.btn-stop:hover:not(:disabled){background:var(--surface);border-color:rgba(217,79,58,0.5);color:var(--red);}
-.btn-new-seg{background:var(--surface);color:var(--text2);border:1px solid var(--border2);font-size:11px;}
-.btn-new-seg:hover{background:var(--surface2);color:var(--text);}
+.btn-photo:disabled,.btn-new-seg:disabled,.btn-listen:disabled,.btn-stop:disabled,.btn-pause:disabled,.btn-rec:disabled{opacity:0.28;cursor:not-allowed;}
+.btn-stop{background:var(--red);color:#fff;border:none;}
+.btn-stop:hover:not(:disabled){background:#c44430;}
+.btn-new-seg{background:rgba(74,143,212,0.22);color:var(--blue);border:1px solid rgba(74,143,212,0.4);}
+.btn-new-seg:hover:not(:disabled){background:rgba(74,143,212,0.35);}
 .btn-listen{background:var(--surface);color:var(--text2);border:1px solid var(--border2);font-size:11px;}
 .btn-listen:hover:not(:disabled){background:var(--surface2);color:var(--text);}
 .btn-send{background:var(--surface2);color:var(--text2);border:1px solid var(--border2);}
@@ -269,19 +270,23 @@ body{
     <div class="controls">
       <div class="btn-row">
         <button class="btn btn-rec" id="btn-rec" onclick="window.startRec()">⏺ Aufnehmen</button>
+        <button class="btn btn-pause" id="btn-pause" disabled onclick="window.togglePause()">⏸ Pause</button>
         <button class="btn btn-stop" id="btn-stop" disabled onclick="window.stopRec()">⏹ Stop</button>
       </div>
       <div class="btn-row">
         <button class="btn btn-photo" id="btn-photo" disabled onclick="window.openCamera()">📷 Foto</button>
       </div>
       <div class="btn-row">
+        <button class="btn btn-new-seg" id="btn-seg" disabled onclick="window.newSegment()">✂ Neuer Abschnitt</button>
+      </div>
+      <!-- AUSGEBLENDET (evtl. spaeter wieder aktivieren): Cue-Back & Anhoeren
+      <div class="btn-row">
         <button class="btn btn-cue" id="btn-cue10" disabled onclick="window.cueBack(10)">⏮ -10s</button>
         <button class="btn btn-cue" id="btn-cue5" disabled onclick="window.cueBack(5)">⏮ -5s</button>
         <button class="btn btn-listen" id="btn-listen" disabled onclick="window.listenLast()">▶ Anhören</button>
       </div>
-      <div class="btn-row">
-        <button class="btn btn-new-seg" id="btn-seg" disabled onclick="window.newSegment()">✂ Neuer Abschnitt</button>
-      </div>
+      -->
+
       <button class="btn btn-send" id="btn-send" disabled onclick="window.finalizeSession()">↗ Audio &amp; Fotos senden</button>
       <div style="display:flex;gap:6px;margin-top:4px;">
         <a href="/korrektur/" id="btn-korrektur" class="btn btn-send" style="flex:1;text-decoration:none;text-align:center;background:var(--bdim);color:var(--blue);border:1px solid rgba(74,143,212,0.3);font-size:11px;">🎧 Korrekturplatz</a>
